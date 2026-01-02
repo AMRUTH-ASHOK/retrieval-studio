@@ -1,0 +1,9 @@
+{
+  "default_chunk_size": 512,
+  "default_overlap": 50,
+  "default_timeout_minutes": 60,
+  "default_top_k": 10,
+  "k_values_for_metrics": [5, 10],
+  "index_timeout_minutes": 30
+}
+
