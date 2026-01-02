@@ -5,14 +5,6 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install databricks-vectorsearch mlflow --quiet
-
-# COMMAND ----------
-
-dbutils.library.restartPython()
-
-# COMMAND ----------
-
 # Widget parameters
 dbutils.widgets.text("run_id", "")
 dbutils.widgets.text("queries_table", "")
@@ -24,6 +16,7 @@ dbutils.widgets.text("schema", "retrieval_studio")
 import json
 import sys
 import os
+import re
 from pyspark.sql import SparkSession
 from databricks.vector_search.client import VectorSearchClient
 import time
@@ -32,8 +25,16 @@ import uuid
 spark = SparkSession.builder.getOrCreate()
 vs_client = VectorSearchClient()
 
-# Add core to path
-sys.path.append("/Workspace" + os.path.dirname(dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()))
+# Add project root to Python path so we can import core and utils modules
+# According to Databricks docs (https://docs.databricks.com/aws/en/ldp/import-workspace-files):
+# - For Git folders, you must prepend /Workspace/ to the path
+# - Use os.path.abspath() for reliability
+# - The root directory of a Git folder is automatically appended when running notebooks,
+#   but for jobs we need to manually add it
+module_path = "/Workspace/Repos/amruth.ashok@databricks.com/retrieval-studio/retrieval-studio"
+sys.path.append(os.path.abspath(module_path))
+print(f"Added to Python path: {os.path.abspath(module_path)}")
+print(f"Current sys.path entries containing 'retrieval': {[p for p in sys.path if 'retrieval' in p.lower()]}")
 
 # COMMAND ----------
 
@@ -79,12 +80,16 @@ def get_run_status_spark(spark, catalog, schema, run_id):
 
 # COMMAND ----------
 
-try:
-    from core.evaluator import RetrievalEvaluator
-    from utils.mlflow_utils import log_eval_run
-    from utils.vs_utils import query_index
-except ImportError:
-    pass
+from core.evaluator import RetrievalEvaluator
+from utils.mlflow_utils import log_eval_run
+from utils.vs_utils import query_index
+
+# COMMAND ----------
+
+def sanitize_identifier(value: str) -> str:
+    """Sanitize strings for table/index identifiers."""
+    sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", value.strip().lower())
+    return sanitized or "default"
 
 # COMMAND ----------
 
@@ -104,6 +109,8 @@ if not run_status:
 config = run_status["config"]
 experiment_id = run_status.get("experiment_id", "")
 strategies = config.get("strategies", ["baseline"])
+project_name = config.get("project_name", "default")
+project_key = sanitize_identifier(project_name)
 
 # COMMAND ----------
 
@@ -130,7 +137,8 @@ for strategy in strategies:
     print(f"Evaluating strategy: {strategy}")
     
     # Get index name (would be stored in run metadata or config)
-    index_name = f"rl_index_{strategy}_{run_id[:8]}"
+    strategy_key = sanitize_identifier(strategy)
+    index_name = f"rs_index_{project_key}_{strategy_key}"
     
     # Evaluate retrieval for this strategy
     strategy_results = []
@@ -181,6 +189,7 @@ for strategy in strategies:
             result = {
                 "eval_result_id": str(uuid.uuid4()),
                 "run_id": run_id,
+                "project": project_name,
                 "strategy": strategy,
                 "mlflow_run_id": "",  # Will be set after logging
                 "query_id": query_id,
@@ -196,6 +205,7 @@ for strategy in strategies:
             result = {
                 "eval_result_id": str(uuid.uuid4()),
                 "run_id": run_id,
+                "project": project_name,
                 "strategy": strategy,
                 "mlflow_run_id": "",
                 "query_id": query_id,
@@ -265,4 +275,3 @@ leaderboard_df.write.mode("overwrite").saveAsTable(leaderboard_table)
 print("Evaluation completed!")
 print("\nLeaderboard:")
 leaderboard_df.show()
-

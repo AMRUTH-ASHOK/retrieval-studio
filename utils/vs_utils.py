@@ -110,7 +110,16 @@ def query_index(
         results = vs_client.query_index(
             index_name=index_name,
             query_text=query_text,
-            columns=["chunk_id", "chunk_text", "metadata"],
+            columns=[
+                "chunk_id",
+                "chunk_text",
+                "metadata_json",
+                "strategy",
+                "chunk_type",
+                "doc_id",
+                "doc_name",
+                "parent_chunk_id",
+            ],
             num_results=k,
             filters=filters
         )
@@ -119,4 +128,3 @@ def query_index(
         # Fallback for different API versions
         # This would need to be adjusted based on actual Vector Search API
         raise NotImplementedError(f"Vector Search query API needs to be implemented: {e}")
-

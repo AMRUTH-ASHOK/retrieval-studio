@@ -5,14 +5,6 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install databricks-vectorsearch mlflow --quiet
-
-# COMMAND ----------
-
-dbutils.library.restartPython()
-
-# COMMAND ----------
-
 # Widget parameters
 dbutils.widgets.text("run_id", "")
 dbutils.widgets.text("config", "{}")
@@ -24,6 +16,7 @@ dbutils.widgets.text("schema", "retrieval_studio")
 import json
 import sys
 import os
+import re
 from pyspark.sql import SparkSession
 from databricks.vector_search.client import VectorSearchClient
 import uuid
@@ -31,8 +24,16 @@ import uuid
 spark = SparkSession.builder.getOrCreate()
 vs_client = VectorSearchClient()
 
-# Add core to path - adjust based on workspace structure
-sys.path.append("/Workspace" + os.path.dirname(dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()))
+# Add project root to Python path so we can import core and utils modules
+# According to Databricks docs (https://docs.databricks.com/aws/en/ldp/import-workspace-files):
+# - For Git folders, you must prepend /Workspace/ to the path
+# - Use os.path.abspath() for reliability
+# - The root directory of a Git folder is automatically appended when running notebooks,
+#   but for jobs we need to manually add it
+module_path = "/Workspace/Repos/amruth.ashok@databricks.com/retrieval-studio/retrieval-studio"
+sys.path.append(os.path.abspath(module_path))
+print(f"Added to Python path: {os.path.abspath(module_path)}")
+print(f"Current sys.path entries containing 'retrieval': {[p for p in sys.path if 'retrieval' in p.lower()]}")
 
 # COMMAND ----------
 
@@ -61,13 +62,9 @@ def update_run_state_spark(spark, catalog, schema, run_id, state, **kwargs):
 
 # COMMAND ----------
 
-try:
-    from core.strategies import BaselineStrategy, StructuredStrategy, ParentChildStrategy
-    from utils.mlflow_utils import create_or_get_experiment, log_build_run
-    from utils.vs_utils import create_vs_index, wait_for_index
-except ImportError:
-    import importlib.util
-    pass
+from core.strategies import get_strategy
+from utils.mlflow_utils import create_or_get_experiment, log_build_run
+from utils.vs_utils import create_vs_index, wait_for_index
 
 # COMMAND ----------
 
@@ -78,6 +75,26 @@ catalog = dbutils.widgets.get("catalog")
 schema = dbutils.widgets.get("schema")
 
 config = json.loads(config_json)
+
+# COMMAND ----------
+
+def sanitize_identifier(value: str) -> str:
+    """Sanitize strings for table/index identifiers."""
+    sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", value.strip().lower())
+    return sanitized or "default"
+
+def write_partitioned_table(df, table_name: str, partition_col: str, replace_value: str) -> None:
+    """Write a partitioned Delta table with replaceWhere for the target partition."""
+    if spark.catalog.tableExists(table_name):
+        (df.write.format("delta")
+            .mode("overwrite")
+            .option("replaceWhere", f"{partition_col} = '{replace_value}'")
+            .saveAsTable(table_name))
+    else:
+        (df.write.format("delta")
+            .partitionBy(partition_col)
+            .mode("overwrite")
+            .saveAsTable(table_name))
 
 # COMMAND ----------
 
@@ -114,6 +131,7 @@ except Exception as e:
 try:
     # Create or get MLflow experiment
     project_name = config.get("project_name", "default")
+    project_key = sanitize_identifier(project_name)
     experiment_name = f"/RetrievalStudio/{catalog}.{schema}/{project_name}"
     experiment_id = create_or_get_experiment(experiment_name)
     
@@ -144,28 +162,40 @@ try:
     index_names = {}
     chunks_tables = {}
     
-    for strategy_name in strategies:
+    if isinstance(strategies, dict):
+        strategy_items = strategies.items()
+    else:
+        strategy_items = [(name, {}) for name in strategies]
+
+    for strategy_name, strategy_params in strategy_items:
         print(f"Processing strategy: {strategy_name}")
         
-        # Get strategy instance
-        if strategy_name == "baseline":
-            strategy = BaselineStrategy(
-                chunk_size=config.get("chunk_size", 512),
-                overlap=config.get("overlap", 50)
-            )
-        elif strategy_name == "structured":
-            strategy = StructuredStrategy(
-                preserve_hierarchy=config.get("preserve_hierarchy", True),
-                max_chunk_size=config.get("max_chunk_size", 1024)
-            )
-        elif strategy_name == "parent_child":
-            strategy = ParentChildStrategy(
-                parent_size=config.get("parent_size", 2048),
-                child_size=config.get("child_size", 256)
-            )
-        else:
-            print(f"Unknown strategy: {strategy_name}, skipping")
-            continue
+        # Strategy parameters can be provided per-strategy or globally.
+        if not strategy_params:
+            strategy_params = config.get("strategy_params", {}).get(strategy_name, {})
+        if not strategy_params:
+            strategy_params = {}
+            default_keys = [
+                "chunk_size",
+                "overlap",
+                "preserve_hierarchy",
+                "max_chunk_size",
+                "parent_size",
+                "child_size",
+                "similarity_threshold",
+                "min_chunk_size",
+                "sentences_per_chunk",
+                "overlap_sentences",
+                "paragraphs_per_chunk",
+            ]
+            for key in default_keys:
+                if key in config:
+                    strategy_params[key] = config.get(key)
+            if "paragraph_max_chunk_size" in config and "max_chunk_size" not in strategy_params:
+                strategy_params["max_chunk_size"] = config.get("paragraph_max_chunk_size")
+        strategy_params = {k: v for k, v in strategy_params.items() if v is not None}
+
+        strategy = get_strategy(strategy_name, **strategy_params)
         
         # Chunk documents
         chunks = strategy.chunk(documents)
@@ -176,39 +206,57 @@ try:
         
         chunks_data = []
         for c in chunks:
+            metadata = c.metadata or {}
             chunks_data.append({
                 "chunk_id": c.chunk_id,
                 "doc_id": c.doc_id,
                 "doc_name": c.doc_name,
                 "chunk_text": c.chunk_text,
                 "chunk_index": c.chunk_index,
-                "metadata": json.dumps(c.metadata),
-                "parent_chunk_id": c.parent_chunk_id if c.parent_chunk_id else None
+                "strategy": metadata.get("strategy", strategy_name),
+                "chunk_type": metadata.get("chunk_type"),
+                "parent_chunk_id": c.parent_chunk_id if c.parent_chunk_id else None,
+                "project": project_name,
+                "run_id": run_id,
+                "metadata_json": json.dumps(metadata),
             })
         
         chunks_df = spark.createDataFrame(chunks_data)
         chunks_df = chunks_df.withColumn("created_at", spark_current_timestamp())
         
         # Write to Delta table
-        chunks_table = f"{catalog}.{schema}.rl_chunks_{strategy_name}"
-        chunks_df.write.format("delta").mode("overwrite").saveAsTable(chunks_table)
+        strategy_key = sanitize_identifier(strategy_name)
+        chunks_table = f"{catalog}.{schema}.rs_chunks_{project_key}_{strategy_key}"
+        write_partitioned_table(chunks_df, chunks_table, "run_id", run_id)
         chunks_tables[strategy_name] = chunks_table
         print(f"Wrote chunks to {chunks_table}")
+
+        if strategy_name == "parent_child":
+            indexable_table = f"{chunks_table}__indexable"
+            indexable_df = chunks_df.filter(chunks_df.chunk_type == "child")
+            write_partitioned_table(indexable_df, indexable_table, "run_id", run_id)
+            print(f"Wrote indexable chunks to {indexable_table}")
+        else:
+            indexable_table = chunks_table
         
         # Create Vector Search index
-        index_name = f"rl_index_{strategy_name}_{run_id[:8]}"
+        index_name = f"rs_index_{project_key}_{strategy_key}"
         embedding_endpoint = config.get("embedding_model_endpoint", "")
         vs_endpoint_name = config.get("vs_endpoint_name", None)
         
         if embedding_endpoint:
             print(f"Creating Vector Search index: {index_name}")
-            create_vs_index(
-                vs_client,
-                index_name=index_name,
-                source_table=chunks_table,
-                embedding_endpoint=embedding_endpoint,
-                vs_endpoint_name=vs_endpoint_name
-            )
+            try:
+                vs_client.get_index(index_name)
+                print(f"Index {index_name} already exists, skipping creation.")
+            except Exception:
+                create_vs_index(
+                    vs_client,
+                    index_name=index_name,
+                    source_table=indexable_table,
+                    embedding_endpoint=embedding_endpoint,
+                    vs_endpoint_name=vs_endpoint_name
+                )
             
             # Wait for index to be ready
             print(f"Waiting for index {index_name} to be ready...")
@@ -265,4 +313,3 @@ except Exception as e:
         pass
     
     raise
-
