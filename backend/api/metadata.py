@@ -8,8 +8,8 @@ from backend.models.schemas import DataTypeInfo, StrategyInfo
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from core.data_types import get_all_data_types
-from core.strategies import get_all_strategies
+from retrieval_core.data_types import get_all_data_types
+from retrieval_core.strategies import get_all_strategies
 
 router = APIRouter()
 

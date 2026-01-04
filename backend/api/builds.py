@@ -37,6 +37,7 @@ async def create_build_job(
         config = build_request.config.model_dump()
         config["catalog"] = settings.CATALOG
         config["schema"] = settings.SCHEMA
+        config["project_name"] = project["project_name"]
         
         # Create run record first
         run_id = create_run(

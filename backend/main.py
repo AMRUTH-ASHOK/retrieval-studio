@@ -144,6 +144,45 @@ async def create_build_job_no_trailing_slash(
         error_detail = f"Failed to submit build job: {str(e)}\n{traceback.format_exc()}"
         raise HTTPException(status_code=500, detail=error_detail)
 
+from backend.models.schemas import EvaluationCreate, EvaluationResponse
+
+@app.post("/api/evaluations", response_model=EvaluationResponse, include_in_schema=False)
+async def create_evaluation_no_trailing_slash(
+    eval_request: EvaluationCreate,
+    w=Depends(get_workspace_client),
+    sql_connector=Depends(get_app_sql_connector)
+):
+    """Submit evaluation job handler for /api/evaluations (without trailing slash)"""
+    try:
+        from utils.jobs import submit_eval_job, get_job_run_status
+        import uuid
+        
+        # Submit the evaluation job
+        job_run_id = submit_eval_job(
+            w=w,
+            catalog=settings.CATALOG,
+            schema=settings.SCHEMA,
+            run_id=eval_request.run_id,
+            queries_table=eval_request.queries_table,
+            notebook_path=settings.EVAL_NOTEBOOK_PATH
+        )
+        
+        job_run_status = get_job_run_status(w, job_run_id)
+        
+        # Return evaluation details
+        return {
+            "eval_id": str(uuid.uuid4()),
+            "run_id": eval_request.run_id,
+            "state": "RUNNING",
+            "job_id": str(job_run_id),
+            "created_at": job_run_status.get("start_time"),
+            "updated_at": job_run_status.get("start_time")
+        }
+    except Exception as e:
+         import traceback
+         error_detail = f"Failed to submit evaluation job: {str(e)}\n{traceback.format_exc()}"
+         raise HTTPException(status_code=500, detail=error_detail)
+
 # Include routers (after explicit routes)
 app.include_router(projects.router, prefix="/api/projects", tags=["projects"])
 app.include_router(builds.router, prefix="/api/builds", tags=["builds"])

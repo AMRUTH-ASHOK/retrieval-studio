@@ -11,6 +11,12 @@ dbutils.widgets.text("queries_table", "")
 dbutils.widgets.text("catalog", "main")
 dbutils.widgets.text("schema", "retrieval_studio")
 
+# MAGIC %pip install databricks-vectorsearch mlflow --quiet
+
+# COMMAND ----------
+
+dbutils.library.restartPython()
+
 # COMMAND ----------
 
 import json
@@ -25,16 +31,30 @@ import uuid
 spark = SparkSession.builder.getOrCreate()
 vs_client = VectorSearchClient()
 
-# Add project root to Python path so we can import core and utils modules
-# According to Databricks docs (https://docs.databricks.com/aws/en/ldp/import-workspace-files):
-# - For Git folders, you must prepend /Workspace/ to the path
-# - Use os.path.abspath() for reliability
-# - The root directory of a Git folder is automatically appended when running notebooks,
-#   but for jobs we need to manually add it
-module_path = "/Workspace/Repos/amruth.ashok@databricks.com/retrieval-studio/retrieval-studio"
-sys.path.append(os.path.abspath(module_path))
-print(f"Added to Python path: {os.path.abspath(module_path)}")
-print(f"Current sys.path entries containing 'retrieval': {[p for p in sys.path if 'retrieval' in p.lower()]}")
+# Robust project root discovery
+current_dir = os.getcwd()
+parent_dir = os.path.dirname(current_dir)
+
+if os.path.isdir(os.path.join(current_dir, "rs_core")):
+    project_root = current_dir
+elif os.path.isdir(os.path.join(parent_dir, "rs_core")):
+    project_root = parent_dir
+else:
+    project_root = None
+    p = current_dir
+    for _ in range(4):
+        if os.path.isdir(os.path.join(p, "rs_core")):
+            project_root = p
+            break
+        p = os.path.dirname(p)
+    if not project_root:
+        project_root = parent_dir
+
+print(f"Using Project Root: {project_root}")
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+print(f"Updated sys.path entries: {[p for p in sys.path if 'retrieval' in str(p).lower()]}")
 
 # COMMAND ----------
 
@@ -80,7 +100,10 @@ def get_run_status_spark(spark, catalog, schema, run_id):
 
 # COMMAND ----------
 
-from core.evaluator import RetrievalEvaluator
+# COMMAND ----------
+
+from retrieval_core.evaluator import RetrievalEvaluator
+from retrieval_core.configs import config as core_config
 from utils.mlflow_utils import log_eval_run
 from utils.vs_utils import query_index
 
@@ -93,11 +116,13 @@ def sanitize_identifier(value: str) -> str:
 
 # COMMAND ----------
 
-# Parse parameters
+# Parse parameters (Defaults from Config)
 run_id = dbutils.widgets.get("run_id")
 queries_table = dbutils.widgets.get("queries_table")
-catalog = dbutils.widgets.get("catalog")
-schema = dbutils.widgets.get("schema")
+catalog = dbutils.widgets.get("catalog") or core_config.CATALOG
+schema = dbutils.widgets.get("schema") or core_config.SCHEMA
+
+print(f"Using Catalog: {catalog}, Schema: {schema}")
 
 # COMMAND ----------
 
@@ -130,17 +155,67 @@ evaluator = RetrievalEvaluator(
 
 # COMMAND ----------
 
-# Evaluate each strategy
+# Evaluate strategies by discovering Child Runs from the Build Job
+import mlflow
+from mlflow.tracking import MlflowClient
+
+client = MlflowClient()
+# Use centralized config for experiment path
+experiment_name = core_config.get_experiment_name(project_name)
+experiment = mlflow.set_experiment(experiment_name)
+print(f"Using MLflow Experiment: {experiment.name}")
+
+# Search for Child Runs of the Build Job
+# Criteria: 
+# 1. tag.build_run_id = run_id (if we logged it) OR
+# 2. We can search for the Parent Run first, then find its children. 
+# Let's assume we can find them by the "build_run_id" param we logged in build_notebook_v2.py
+
+print(f"Searching for child runs with params.build_run_id = '{run_id}'")
+child_runs = mlflow.search_runs(
+    experiment_ids=[experiment.experiment_id],
+    filter_string=f"params.build_run_id = '{run_id}'",
+    run_view_type=mlflow.entities.ViewType.ACTIVE_ONLY
+)
+
+if child_runs.empty:
+    print(f"⚠️ No child runs found for build_run_id: {run_id}. Checking via parent run name...")
+    # Fallback/Debug: try to find parent run first
+    parent_runs = mlflow.search_runs(
+        experiment_ids=[experiment.experiment_id],
+        filter_string=f"tags.retrieval_studio_type = 'build_parent' AND params.build_run_id = '{run_id}'"
+    )
+    if not parent_runs.empty:
+        parent_run_id = parent_runs.iloc[0].run_id
+        print(f"Found Parent Run: {parent_run_id}. Searching children via parent_run_id tag not possible directly unless we tagged them.")
+        # In build_notebook_v2, we used nested=True, so they are children.
+        # But searching by 'tags.mlflow.parentRunId' is the standard way.
+        child_runs = mlflow.search_runs(
+             experiment_ids=[experiment.experiment_id],
+             filter_string=f"tags.mlflow.parentRunId = '{parent_run_id}'"
+        )
+
+if child_runs.empty:
+    raise ValueError(f"No child runs found for build {run_id}. Cannot evaluate.")
+
+print(f"Found {len(child_runs)} child runs to evaluate.")
+
 all_results = []
 
-for strategy in strategies:
-    print(f"Evaluating strategy: {strategy}")
+for _, run in child_runs.iterrows():
+    run_id_mlflow = run.run_id
+    strategy_name = run["params.strategy_name"]
+    index_name = run.get("params.vs_index_name")
     
-    # Get index name (would be stored in run metadata or config)
-    strategy_key = sanitize_identifier(strategy)
-    index_name = f"rs_index_{project_key}_{strategy_key}"
-    
-    # Evaluate retrieval for this strategy
+    if not index_name:
+        print(f"Skipping run {run_id_mlflow} (strategy: {strategy_name}) - No index_name found.")
+        continue
+        
+    print(f"\nEvaluating Run: {run_id_mlflow}")
+    print(f"  Strategy: {strategy_name}")
+    print(f"  Index: {index_name}")
+
+    # Evaluate retrieval
     strategy_results = []
     
     for query_row in queries_df.collect():
@@ -148,7 +223,7 @@ for strategy in strategies:
         query_text = query_row.query_text
         
         try:
-            # Retrieve chunks
+            # Retrieve
             start_time = time.time()
             retrieved_chunks = query_index(
                 vs_client,
@@ -159,119 +234,85 @@ for strategy in strategies:
             )
             latency_ms = (time.time() - start_time) * 1000
             
-            # Compute metrics
+            # Compute Metrics
             expected_chunks = None
             if query_row.expected_chunks:
                 try:
                     expected_chunks = json.loads(query_row.expected_chunks)
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                except: pass
             
+            metrics = {}
             if expected_chunks:
-                # Labeled evaluation
-                metrics = evaluator.compute_labeled_metrics(
-                    query_text,
-                    retrieved_chunks,
-                    expected_chunks,
-                    k_values=[5, 10]
-                )
+                metrics = evaluator.compute_labeled_metrics(query_text, retrieved_chunks, expected_chunks, k_values=[5, 10])
             else:
-                # Unlabeled evaluation with LLM judge
-                metrics = evaluator.compute_judge_metrics(
-                    query_text,
-                    retrieved_chunks,
-                    k_values=[5, 10]
-                )
+                 metrics = evaluator.compute_judge_metrics(query_text, retrieved_chunks, k_values=[5, 10])
             
             metrics["retrieval_latency_ms"] = latency_ms
             
-            # Store result
+            # Prepare result dict
             result = {
                 "eval_result_id": str(uuid.uuid4()),
-                "run_id": run_id,
+                "run_id": run_id, # Our app's run_id
+                "mlflow_run_id": run_id_mlflow, # The specific child run
                 "project": project_name,
-                "strategy": strategy,
-                "mlflow_run_id": "",  # Will be set after logging
-                "query_id": query_id,
+                "strategy": strategy_name,
                 "query_text": query_text,
-                "retrieved_chunks": json.dumps(retrieved_chunks),
                 "metrics": json.dumps(metrics),
-                "retrieval_latency_ms": latency_ms
+                "created_at": time.time()
             }
             strategy_results.append(result)
+            
         except Exception as e:
-            print(f"Error evaluating query {query_id}: {e}")
-            # Store error result
-            result = {
-                "eval_result_id": str(uuid.uuid4()),
-                "run_id": run_id,
-                "project": project_name,
-                "strategy": strategy,
-                "mlflow_run_id": "",
-                "query_id": query_id,
-                "query_text": query_text,
-                "retrieved_chunks": json.dumps([]),
-                "metrics": json.dumps({"error": str(e)}),
-                "retrieval_latency_ms": 0.0
-            }
-            strategy_results.append(result)
-    
-    # Log eval run to MLflow
-    # Aggregate metrics
-    aggregated_metrics = evaluator.aggregate_metrics(strategy_results)
-    
-    mlflow_run_id = log_eval_run(
-        experiment_id=experiment_id,
-        run_id=run_id,
-        strategy=strategy,
-        metrics=aggregated_metrics,
-        leaderboard_path=None,  # Will generate
-        examples_path=None,  # Will generate
-        state="SUCCESS"
-    )
-    
-    # Update mlflow_run_id in results
-    for result in strategy_results:
-        result["mlflow_run_id"] = mlflow_run_id
-    
-    all_results.extend(strategy_results)
-    
-    print(f"Completed evaluation for {strategy}")
+            print(f"  ❌ Error query {query_id}: {e}")
+
+    # Aggregation
+    if strategy_results:
+        # Simple aggregation for logging
+        avg_recall_10 = sum([json.loads(r["metrics"]).get("recall_at_10", 0) for r in strategy_results]) / len(strategy_results)
+        avg_ndcg_10 = sum([json.loads(r["metrics"]).get("ndcg_at_10", 0) for r in strategy_results]) / len(strategy_results)
+        avg_latency = sum([r["metrics"] for r in strategy_results], 0) # simplified, fix below
+        
+        # Re-calc properly
+        recalls = [json.loads(r["metrics"]).get("recall_at_10", 0) for r in strategy_results]
+        ndcgs = [json.loads(r["metrics"]).get("ndcg_at_10", 0) for r in strategy_results]
+        latencies = [json.loads(r["metrics"]).get("retrieval_latency_ms", 0) for r in strategy_results]
+        
+        avg_recall_10 = sum(recalls) / len(recalls) if recalls else 0
+        avg_ndcg_10 = sum(ndcgs) / len(ndcgs) if ndcgs else 0
+        avg_latency = sum(latencies) / len(latencies) if latencies else 0
+        
+        print(f"  ✅ Logging Metrics to Child Run {run_id_mlflow}")
+        print(f"     Recall@10: {avg_recall_10:.4f}")
+        print(f"     NDCG@10:   {avg_ndcg_10:.4f}")
+        
+        # Log to EXISTING Child Run
+        client.log_metric(run_id_mlflow, "recall_at_10", avg_recall_10)
+        client.log_metric(run_id_mlflow, "ndcg_at_10", avg_ndcg_10)
+        client.log_metric(run_id_mlflow, "avg_latency_ms", avg_latency)
+        
+        all_results.extend(strategy_results)
+        
+    print(f"Completed {strategy_name}")
 
 # COMMAND ----------
 
-# Write results to Delta with actual timestamps
+# Write results to Delta (optional, but good for raw data backup)
 if all_results:
     from pyspark.sql.functions import current_timestamp as spark_current_timestamp
-    results_df = spark.createDataFrame(all_results)
-    results_df = results_df.withColumn("created_at", spark_current_timestamp())
-    results_df.write.format("delta").mode("append").saveAsTable(f"{catalog}.{schema}.rl_eval_results")
-    print(f"Wrote {len(all_results)} evaluation results to Delta")
+    # Convert list of dicts to RDD/DF - handle potential schema issues by being explicit or using JSON
+    # For MVP, simpler to just assume consistent schema
+    try:
+        results_df = spark.createDataFrame(all_results)
+        results_df = results_df.withColumn("created_at", spark_current_timestamp())
+        results_df.write.format("delta").mode("append").saveAsTable(f"{catalog}.{schema}.rl_eval_results")
+        print(f"Wrote {len(all_results)} evaluation results to Delta (backup)")
+    except Exception as e:
+        print(f"⚠️ Failed to write to Delta: {e}")
 
-# COMMAND ----------
-
-# Generate leaderboard using get_json_object (Spark SQL function)
-escaped_run_id = run_id.replace("'", "''")  # Prevent SQL injection
-leaderboard_df = spark.sql(f"""
-    SELECT 
-        strategy,
-        AVG(CAST(get_json_object(metrics, '$.recall_at_5') AS DOUBLE)) as avg_recall_at_5,
-        AVG(CAST(get_json_object(metrics, '$.recall_at_10') AS DOUBLE)) as avg_recall_at_10,
-        AVG(CAST(get_json_object(metrics, '$.ndcg_at_5') AS DOUBLE)) as avg_ndcg_at_5,
-        AVG(CAST(get_json_object(metrics, '$.ndcg_at_10') AS DOUBLE)) as avg_ndcg_at_10,
-        AVG(retrieval_latency_ms) as avg_latency_ms,
-        COUNT(*) as num_queries
-    FROM {catalog}.{schema}.rl_eval_results
-    WHERE run_id = '{escaped_run_id}'
-    GROUP BY strategy
-    ORDER BY avg_recall_at_10 DESC
-""")
-
-# Save leaderboard - use sanitized table name (replace hyphens with underscores)
-safe_run_id = run_id.replace("-", "_")
-leaderboard_table = f"{catalog}.{schema}.rl_leaderboard_{safe_run_id}"
-leaderboard_df.write.mode("overwrite").saveAsTable(leaderboard_table)
-
-print("Evaluation completed!")
-print("\nLeaderboard:")
-leaderboard_df.show()
+# Generating Leaderboard - DEPRECATED in favor of MLflow UI
+# But we can print a simple text summary
+print("\n" + "="*80)
+print("EVALUATION COMPLETE - View Results in MLflow Experiments UI")
+print("="*80)
+print(f"Go to Experiment: {experiment_name}")
+print("Use 'Compare Runs' to see Leaderboard with Recall/NDCG.")
