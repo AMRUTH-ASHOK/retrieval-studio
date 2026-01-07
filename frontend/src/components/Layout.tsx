@@ -1,34 +1,17 @@
 import { ReactNode } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
-import {
-  Box,
-  Drawer,
-  AppBar,
-  Toolbar,
-  List,
-  Typography,
-  Divider,
-  ListItem,
-  ListItemButton,
-  ListItemIcon,
-  ListItemText,
-  Select,
-  MenuItem,
-  FormControl,
-  InputLabel,
-  SelectChangeEvent,
-  CircularProgress,
-} from '@mui/material'
-import {
-  Folder as FolderIcon,
-  Build as BuildIcon,
-  Assessment as AssessmentIcon,
-  RateReview as ReviewIcon,
-  Leaderboard as LeaderboardIcon,
-} from '@mui/icons-material'
+import { 
+  FolderOpen, 
+  Hammer, 
+  FlaskConical, 
+  FileText, 
+  Trophy,
+  ChevronRight 
+} from 'lucide-react'
 import { useProject } from '../context/ProjectContext'
+import { Select } from './ui/Select'
 
-const drawerWidth = 280
+const drawerWidth = 260
 
 interface LayoutProps {
   children: ReactNode
@@ -39,84 +22,108 @@ export default function Layout({ children }: LayoutProps) {
   const location = useLocation()
   const { projects, selectedProjectId, setSelectedProjectId, isLoading } = useProject()
 
-  const handleProjectChange = (event: SelectChangeEvent) => {
-    setSelectedProjectId(event.target.value)
-  }
-
   const menuItems = [
-    { text: 'Project Setup', icon: <FolderIcon />, path: '/projects' },
-    { text: 'Build', icon: <BuildIcon />, path: '/build' },
-    { text: 'Evaluate', icon: <AssessmentIcon />, path: '/evaluate' },
-    { text: 'Review', icon: <ReviewIcon />, path: '/review' },
-    { text: 'Leaderboard', icon: <LeaderboardIcon />, path: '/leaderboard' },
+    { text: 'Projects', icon: FolderOpen, path: '/projects' },
+    { text: 'Build', icon: Hammer, path: '/build' },
+    { text: 'Evaluate', icon: FlaskConical, path: '/evaluate' },
+    { text: 'Review', icon: FileText, path: '/review' },
+    { text: 'Leaderboard', icon: Trophy, path: '/leaderboard' },
   ]
 
+  const projectOptions = projects.map(p => ({
+    value: p.project_id,
+    label: p.project_name
+  }))
+
   return (
-    <Box sx={{ display: 'flex' }}>
-      <AppBar position="fixed" sx={{ zIndex: (theme) => theme.zIndex.drawer + 1 }}>
-        <Toolbar>
-          <Typography variant="h6" noWrap component="div">
-            🔍 Retrieval Studio
-          </Typography>
-        </Toolbar>
-      </AppBar>
-      <Drawer
-        variant="permanent"
-        sx={{
-          width: drawerWidth,
-          flexShrink: 0,
-          '& .MuiDrawer-paper': {
-            width: drawerWidth,
-            boxSizing: 'border-box',
-          },
-        }}
+    <div className="flex h-screen bg-databricks-gray-50">
+      {/* Sidebar */}
+      <div 
+        className="bg-white border-r border-databricks-gray-200 flex flex-col"
+        style={{ width: drawerWidth }}
       >
-        <Toolbar />
-        <Box sx={{ overflow: 'auto', p: 2 }}>
+        {/* Logo/Header */}
+        <div className="h-16 flex items-center px-6 border-b border-databricks-gray-200">
+          <h1 className="text-lg font-semibold text-databricks-gray-900">
+            🔍 Retrieval Studio
+          </h1>
+        </div>
+
+        {/* Project Selector */}
+        <div className="p-4 border-b border-databricks-gray-200">
           {isLoading ? (
-            <Box sx={{ display: 'flex', justifyContent: 'center', py: 2 }}>
-              <CircularProgress size={24} />
-            </Box>
+            <div className="flex items-center justify-center py-2">
+              <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-databricks-blue"></div>
+            </div>
           ) : projects.length > 0 ? (
-            <FormControl fullWidth sx={{ mb: 2 }}>
-              <InputLabel>Project</InputLabel>
-              <Select
-                value={selectedProjectId}
-                label="Project"
-                onChange={handleProjectChange}
-              >
-                {projects.map((project) => (
-                  <MenuItem key={project.project_id} value={project.project_id}>
-                    {project.project_name}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
+            <Select
+              value={selectedProjectId}
+              onChange={(e) => setSelectedProjectId(e.target.value)}
+              options={[
+                { value: '', label: 'Select project' },
+                ...projectOptions
+              ]}
+            />
           ) : (
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              No projects yet. Create one first!
-            </Typography>
+            <p className="text-sm text-databricks-gray-500 text-center py-2">
+              No projects yet
+            </p>
           )}
-          <Divider sx={{ mb: 2 }} />
-          <List>
-            {menuItems.map((item) => (
-              <ListItem key={item.text} disablePadding>
-                <ListItemButton
-                  selected={location.pathname === item.path}
-                  onClick={() => navigate(item.path)}
-                >
-                  <ListItemIcon>{item.icon}</ListItemIcon>
-                  <ListItemText primary={item.text} />
-                </ListItemButton>
-              </ListItem>
-            ))}
-          </List>
-        </Box>
-      </Drawer>
-      <Box component="main" sx={{ flexGrow: 1, p: 3 }}>
-        <Toolbar />
-        {children}
-      </Box>
-    </Box>
+        </div>
+
+        {/* Navigation */}
+        <nav className="flex-1 overflow-y-auto custom-scrollbar p-2">
+          {menuItems.map((item) => {
+            const Icon = item.icon
+            const isActive = location.pathname === item.path
+
+            return (
+              <button
+                key={item.path}
+                onClick={() => navigate(item.path)}
+                className={`w-full flex items-center px-4 py-2.5 mb-1 rounded-md text-sm font-medium transition-colors ${
+                  isActive
+                    ? 'bg-databricks-blue text-white'
+                    : 'text-databricks-gray-700 hover:bg-databricks-gray-100'
+                }`}
+              >
+                <Icon className="w-5 h-5 mr-3" />
+                <span className="flex-1 text-left">{item.text}</span>
+              </button>
+            )
+          })}
+        </nav>
+
+        {/* Footer/Version */}
+        <div className="p-4 border-t border-databricks-gray-200">
+          <p className="text-xs text-databricks-gray-500 text-center">
+            Retrieval Studio v1.0.0
+          </p>
+        </div>
+      </div>
+
+      {/* Main Content */}
+      <div className="flex-1 flex flex-col overflow-hidden">
+        {/* Top Bar with Breadcrumbs */}
+        <div className="h-16 bg-white border-b border-databricks-gray-200 flex items-center px-8">
+          <div className="flex items-center text-sm text-databricks-gray-600">
+            <span className="text-databricks-blue cursor-pointer hover:underline">
+              Retrieval Studio
+            </span>
+            <ChevronRight className="w-4 h-4 mx-2" />
+            <span className="text-databricks-gray-900 font-medium">
+              {menuItems.find(item => item.path === location.pathname)?.text || 'Dashboard'}
+            </span>
+          </div>
+        </div>
+
+        {/* Main Content Area */}
+        <main className="flex-1 overflow-y-auto custom-scrollbar">
+          <div className="max-w-7xl mx-auto p-8">
+            {children}
+          </div>
+        </main>
+      </div>
+    </div>
   )
 }
