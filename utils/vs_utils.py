@@ -1,130 +1,112 @@
 from databricks.vector_search.client import VectorSearchClient
 import time
 
+DEFAULT_COLUMNS = [
+    "chunk_id",
+    "chunk_text",
+    "metadata_json",
+    "strategy",
+    "chunk_type",
+    "doc_id",
+    "doc_name",
+    "parent_chunk_id",
+    "run_id",
+    "project",
+]
+
 def create_vs_index(
     vs_client: VectorSearchClient,
+    endpoint_name: str,
     index_name: str,
-    source_table: str,
-    embedding_endpoint: str,
+    source_table_name: str,
+    embedding_model_endpoint_name: str,
     primary_key: str = "chunk_id",
-    vs_endpoint_name: str = None
+    embedding_source_column: str = "chunk_text",
+    pipeline_type: str = "TRIGGERED",
 ):
     """
-    Create Vector Search index
-    
-    Args:
-        vs_client: VectorSearchClient instance
-        index_name: Name for the index
-        source_table: Full table name (catalog.schema.table)
-        embedding_endpoint: Model serving endpoint for embeddings
-        primary_key: Primary key column name
-        embedding_vector_column: Column name containing embeddings
-        vs_endpoint_name: Vector Search endpoint name
-        **kwargs: Additional index configuration
+    Create (or ensure) a Delta Sync Vector Search index.
+    Assumes the index does not exist; if your environment needs idempotency,
+    wrap in a try/get_index and skip if exists.
     """
-    # Use the correct API method: create_delta_sync_index
-    # Note: Actual API may vary - adjust based on your Databricks version
-    try:
-        # Try the delta sync index creation API
-        vs_client.create_delta_sync_index(
-            index_name=index_name,
-            primary_key=primary_key,
-            index_spec={
-                "embedding_source_columns": [
-                    {
-                        "name": "chunk_text",
-                        "embedding_model_endpoint_name": embedding_endpoint
-                    }
-                ],
-                "source_table": source_table,
-                "pipeline_type": "TRIGGERED"
-            },
-            endpoint_name=vs_endpoint_name
-        )
-    except AttributeError:
-        # Fallback: try alternative API format
-        # This is a placeholder - adjust based on actual Vector Search API
-        raise NotImplementedError(
-            "Vector Search API needs to be implemented based on your Databricks version. "
-            "Please check the VectorSearchClient API documentation."
-        )
+    vs_client.create_delta_sync_index(
+        endpoint_name=endpoint_name,
+        index_name=index_name,
+        primary_key=primary_key,
+        index_spec={
+            "source_table": source_table_name,
+            "pipeline_type": pipeline_type,
+            "embedding_source_columns": [
+                {
+                    "name": embedding_source_column,
+                    "embedding_model_endpoint_name": embedding_model_endpoint_name,
+                }
+            ],
+        },
+    )
 
 def wait_for_index(
     vs_client: VectorSearchClient,
+    endpoint_name: str,
     index_name: str,
     timeout_minutes: int = 30,
     check_interval_seconds: int = 10
 ) -> bool:
-    """
-    Wait for index to be ready
-    
-    Returns:
-        True if ready, False if timeout
-    """
     start_time = time.time()
     timeout_seconds = timeout_minutes * 60
-    
+
     while time.time() - start_time < timeout_seconds:
         try:
-            index = vs_client.get_index(index_name)
-            # Check if index is ready - API may return different formats
-            if hasattr(index, 'status'):
-                status = index.status
-                if isinstance(status, dict) and status.get("ready"):
-                    return True
-                elif hasattr(status, 'ready') and status.ready:
-                    return True
+            idx = vs_client.get_index(endpoint_name=endpoint_name, index_name=index_name)
+            # Different SDK versions expose status differently
+            status = getattr(idx, "status", None)
+            if isinstance(status, dict) and status.get("ready"):
+                return True
+            if hasattr(status, "ready") and status.ready:
+                return True
         except Exception:
-            # Index might not exist yet, continue polling
             pass
-        
+
         time.sleep(check_interval_seconds)
-    
+
     return False
 
 def query_index(
     vs_client: VectorSearchClient,
+    endpoint_name: str,
     index_name: str,
     query_text: str,
-    embedding_endpoint: str,
     k: int = 10,
-    filters: dict = None
+    filters: dict = None,
+    columns: list = None,
 ) -> list:
     """
-    Query Vector Search index
-    
-    Args:
-        vs_client: VectorSearchClient instance
-        index_name: Index name
-        query_text: Query text
-        embedding_endpoint: Model serving endpoint for embeddings
-        k: Number of results to return
-        filters: Optional filters
-    
-    Returns:
-        List of retrieved chunks with scores
+    Returns: List[Dict] with keys matching `columns`.
     """
-    # Query index
-    # Note: Actual API may vary - this is a placeholder implementation
+    cols = columns or DEFAULT_COLUMNS
+
+    # Preferred pattern across SDK versions: get_index(...).similarity_search(...)
     try:
-        results = vs_client.query_index(
-            index_name=index_name,
+        idx = vs_client.get_index(endpoint_name=endpoint_name, index_name=index_name)
+        res = idx.similarity_search(
             query_text=query_text,
-            columns=[
-                "chunk_id",
-                "chunk_text",
-                "metadata_json",
-                "strategy",
-                "chunk_type",
-                "doc_id",
-                "doc_name",
-                "parent_chunk_id",
-            ],
+            columns=cols,
             num_results=k,
             filters=filters
         )
-        return results.get("result", {}).get("data_array", [])
+        # Many SDKs return {"result": {"data_array": [...], "manifest": {"columns": [...]}}}
+        result = res.get("result", {})
+        data_array = result.get("data_array", [])
+        manifest_cols = (result.get("manifest", {}) or {}).get("columns", cols)
+
+        out = []
+        for row in data_array:
+            # row may be list or dict depending on version
+            if isinstance(row, dict):
+                out.append(row)
+            else:
+                out.append({manifest_cols[i]: row[i] for i in range(min(len(manifest_cols), len(row)))})
+        return out
+
     except Exception as e:
-        # Fallback for different API versions
-        # This would need to be adjusted based on actual Vector Search API
-        raise NotImplementedError(f"Vector Search query API needs to be implemented: {e}")
+        raise RuntimeError(f"Vector Search query failed: {e}")

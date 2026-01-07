@@ -16,14 +16,14 @@ class Settings(BaseSettings):
     """Application settings"""
     
     # Databricks Configuration
-    DATABRICKS_HOST: Optional[str] = core_config.DATABRICKS_HOST
+    DATABRICKS_HOST: Optional[str] = os.environ.get("DATABRICKS_HOST")
     DATABRICKS_CLIENT_ID: Optional[str] = os.environ.get("DATABRICKS_CLIENT_ID")
     DATABRICKS_CLIENT_SECRET: Optional[str] = os.environ.get("DATABRICKS_CLIENT_SECRET")
-    DATABRICKS_HTTP_PATH: Optional[str] = core_config.DATABRICKS_HTTP_PATH
+    DATABRICKS_HTTP_PATH: Optional[str] = os.environ.get("DATABRICKS_HTTP_PATH")
     
     # Catalog and Schema
-    CATALOG: str = core_config.CATALOG
-    SCHEMA: str = core_config.SCHEMA
+    CATALOG: str = core_config.UC_CATALOG
+    SCHEMA: str = core_config.RAW_SCHEMA
     
     # Notebook Paths
     BUILD_NOTEBOOK_PATH: str = core_config.BUILD_NOTEBOOK_PATH

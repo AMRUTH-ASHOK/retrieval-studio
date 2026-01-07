@@ -1,49 +1,44 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # Retrieval Studio - Evaluation Job
-# MAGIC This notebook evaluates retrieval quality for each strategy
+# MAGIC # Retrieval Studio - Evaluation Job (Product)
 
 # COMMAND ----------
-
-# Widget parameters
-dbutils.widgets.text("run_id", "")
+dbutils.widgets.text("build_run_id", "")
+dbutils.widgets.text("project_name", "default")
 dbutils.widgets.text("queries_table", "")
-dbutils.widgets.text("catalog", "main")
-dbutils.widgets.text("schema", "retrieval_studio")
-
-# MAGIC %pip install databricks-vectorsearch mlflow --quiet
+dbutils.widgets.text("top_k", "10")
+dbutils.widgets.text("catalog", "")
+dbutils.widgets.text("schema", "")
 
 # COMMAND ----------
-
+# MAGIC %pip install databricks-vectorsearch mlflow --quiet
+# COMMAND ----------
 dbutils.library.restartPython()
 
 # COMMAND ----------
-
-import json
-import sys
-import os
-import re
+import json, time, uuid
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import current_timestamp
 from databricks.vector_search.client import VectorSearchClient
-import time
-import uuid
 
 spark = SparkSession.builder.getOrCreate()
 vs_client = VectorSearchClient()
 
-# Robust project root discovery
+import os
+import sys
+
 current_dir = os.getcwd()
 parent_dir = os.path.dirname(current_dir)
-
-if os.path.isdir(os.path.join(current_dir, "rs_core")):
-    project_root = current_dir
-elif os.path.isdir(os.path.join(parent_dir, "rs_core")):
-    project_root = parent_dir
+# Check logic for finding the 'retrieval_core' package 
+project_root = None 
+if os.path.isdir(os.path.join(current_dir, "retrieval_core")): 
+    project_root = current_dir 
+elif os.path.isdir(os.path.join(parent_dir, "retrieval_core")): 
+    project_root = parent_dir 
 else:
-    project_root = None
     p = current_dir
     for _ in range(4):
-        if os.path.isdir(os.path.join(p, "rs_core")):
+        if os.path.isdir(os.path.join(p, "retrieval_core")):
             project_root = p
             break
         p = os.path.dirname(p)
@@ -51,268 +46,166 @@ else:
         project_root = parent_dir
 
 print(f"Using Project Root: {project_root}")
+
 if project_root not in sys.path:
+    # Use insert(0) to prioritize our project root over system paths
     sys.path.insert(0, project_root)
 
-print(f"Updated sys.path entries: {[p for p in sys.path if 'retrieval' in str(p).lower()]}")
+from retrieval_core.configs import config as core_config
 
-# COMMAND ----------
+# Apply catalog/schema overrides from widgets
+catalog_override = dbutils.widgets.get("catalog")
+schema_override = dbutils.widgets.get("schema")
 
-# Helper function for state management using Spark SQL
-def update_run_state_spark(spark, catalog, schema, run_id, state, **kwargs):
-    """Update run state using Spark SQL"""
-    updates = {"state": f"'{state}'"}
-    for key, value in kwargs.items():
-        if value is not None:
-            if isinstance(value, str):
-                escaped_value = value.replace("'", "''")
-                updates[key] = f"'{escaped_value}'"
-            else:
-                updates[key] = str(value)
-    
-    set_clause = ", ".join([f"{k} = {v}" for k, v in updates.items()])
-    set_clause += ", updated_at = current_timestamp()"
-    
-    query = f"""
-        UPDATE {catalog}.{schema}.rl_runs 
-        SET {set_clause}
-        WHERE run_id = '{run_id}'
-    """
-    spark.sql(query)
-
-def get_run_status_spark(spark, catalog, schema, run_id):
-    """Get run status using Spark SQL"""
-    df = spark.sql(f"""
-        SELECT * FROM {catalog}.{schema}.rl_runs 
-        WHERE run_id = '{run_id}'
-    """)
-    if df.count() == 0:
-        return None
-    row = df.first()
-    result = row.asDict()
-    # Parse config JSON
-    if result.get("config"):
-        try:
-            result["config"] = json.loads(result["config"])
-        except:
-            result["config"] = {}
-    return result
-
-# COMMAND ----------
-
-# COMMAND ----------
+if catalog_override:
+    type(core_config).UC_CATALOG = catalog_override
+if schema_override:
+    type(core_config).RAW_SCHEMA = schema_override
 
 from retrieval_core.evaluator import RetrievalEvaluator
-from retrieval_core.configs import config as core_config
-from utils.mlflow_utils import log_eval_run
 from utils.vs_utils import query_index
 
 # COMMAND ----------
-
-def sanitize_identifier(value: str) -> str:
-    """Sanitize strings for table/index identifiers."""
-    sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", value.strip().lower())
-    return sanitized or "default"
-
-# COMMAND ----------
-
-# Parse parameters (Defaults from Config)
-run_id = dbutils.widgets.get("run_id")
+build_run_id = dbutils.widgets.get("build_run_id")
+project_name = dbutils.widgets.get("project_name") or "default"
 queries_table = dbutils.widgets.get("queries_table")
-catalog = dbutils.widgets.get("catalog") or core_config.CATALOG
-schema = dbutils.widgets.get("schema") or core_config.SCHEMA
+top_k = int(dbutils.widgets.get("top_k") or "10")
 
-print(f"Using Catalog: {catalog}, Schema: {schema}")
-
-# COMMAND ----------
-
-# Get run status using Spark SQL
-run_status = get_run_status_spark(spark, catalog, schema, run_id)
-if not run_status:
-    raise ValueError(f"Run {run_id} not found")
-
-config = run_status["config"]
-experiment_id = run_status.get("experiment_id", "")
-strategies = config.get("strategies", ["baseline"])
-project_name = config.get("project_name", "default")
-project_key = sanitize_identifier(project_name)
+if not build_run_id:
+    raise ValueError("Missing build_run_id")
+if not queries_table:
+    raise ValueError("Missing queries_table")
 
 # COMMAND ----------
+# Load queries once
+qdf = spark.table(queries_table)
+if "query_text" not in qdf.columns:
+    raise ValueError("queries_table must include query_text")
 
-# Load queries
-queries_df = spark.table(queries_table)
-queries = [row.query_text for row in queries_df.select("query_text").collect()]
+cols = ["query_text"]
+if "expected_chunks" in qdf.columns:
+    cols.append("expected_chunks")
 
-print(f"Loaded {len(queries)} queries for evaluation")
-
-# COMMAND ----------
-
-# Initialize evaluator
-evaluator = RetrievalEvaluator(
-    embedding_endpoint=config.get("embedding_model_endpoint", ""),
-    judge_model_endpoint=config.get("judge_model_endpoint", None)  # Optional LLM judge
-)
+query_rows = qdf.select(*cols).collect()
 
 # COMMAND ----------
-
-# Evaluate strategies by discovering Child Runs from the Build Job
 import mlflow
-from mlflow.tracking import MlflowClient
-
-client = MlflowClient()
-# Use centralized config for experiment path
 experiment_name = core_config.get_experiment_name(project_name)
-experiment = mlflow.set_experiment(experiment_name)
-print(f"Using MLflow Experiment: {experiment.name}")
+exp = mlflow.set_experiment(experiment_name)
 
-# Search for Child Runs of the Build Job
-# Criteria: 
-# 1. tag.build_run_id = run_id (if we logged it) OR
-# 2. We can search for the Parent Run first, then find its children. 
-# Let's assume we can find them by the "build_run_id" param we logged in build_notebook_v2.py
-
-print(f"Searching for child runs with params.build_run_id = '{run_id}'")
-child_runs = mlflow.search_runs(
-    experiment_ids=[experiment.experiment_id],
-    filter_string=f"params.build_run_id = '{run_id}'",
-    run_view_type=mlflow.entities.ViewType.ACTIVE_ONLY
+build_child_runs = mlflow.search_runs(
+    experiment_ids=[exp.experiment_id],
+    filter_string=f"params.build_run_id = '{build_run_id}' AND tags.rs_role = 'build_strategy'",
 )
 
-if child_runs.empty:
-    print(f"⚠️ No child runs found for build_run_id: {run_id}. Checking via parent run name...")
-    # Fallback/Debug: try to find parent run first
-    parent_runs = mlflow.search_runs(
-        experiment_ids=[experiment.experiment_id],
-        filter_string=f"tags.retrieval_studio_type = 'build_parent' AND params.build_run_id = '{run_id}'"
-    )
-    if not parent_runs.empty:
-        parent_run_id = parent_runs.iloc[0].run_id
-        print(f"Found Parent Run: {parent_run_id}. Searching children via parent_run_id tag not possible directly unless we tagged them.")
-        # In build_notebook_v2, we used nested=True, so they are children.
-        # But searching by 'tags.mlflow.parentRunId' is the standard way.
-        child_runs = mlflow.search_runs(
-             experiment_ids=[experiment.experiment_id],
-             filter_string=f"tags.mlflow.parentRunId = '{parent_run_id}'"
-        )
-
-if child_runs.empty:
-    raise ValueError(f"No child runs found for build {run_id}. Cannot evaluate.")
-
-print(f"Found {len(child_runs)} child runs to evaluate.")
-
-all_results = []
-
-for _, run in child_runs.iterrows():
-    run_id_mlflow = run.run_id
-    strategy_name = run["params.strategy_name"]
-    index_name = run.get("params.vs_index_name")
-    
-    if not index_name:
-        print(f"Skipping run {run_id_mlflow} (strategy: {strategy_name}) - No index_name found.")
-        continue
-        
-    print(f"\nEvaluating Run: {run_id_mlflow}")
-    print(f"  Strategy: {strategy_name}")
-    print(f"  Index: {index_name}")
-
-    # Evaluate retrieval
-    strategy_results = []
-    
-    for query_row in queries_df.collect():
-        query_id = query_row.query_id
-        query_text = query_row.query_text
-        
-        try:
-            # Retrieve
-            start_time = time.time()
-            retrieved_chunks = query_index(
-                vs_client,
-                index_name,
-                query_text,
-                config.get("embedding_model_endpoint", ""),
-                k=config.get("top_k", 10)
-            )
-            latency_ms = (time.time() - start_time) * 1000
-            
-            # Compute Metrics
-            expected_chunks = None
-            if query_row.expected_chunks:
-                try:
-                    expected_chunks = json.loads(query_row.expected_chunks)
-                except: pass
-            
-            metrics = {}
-            if expected_chunks:
-                metrics = evaluator.compute_labeled_metrics(query_text, retrieved_chunks, expected_chunks, k_values=[5, 10])
-            else:
-                 metrics = evaluator.compute_judge_metrics(query_text, retrieved_chunks, k_values=[5, 10])
-            
-            metrics["retrieval_latency_ms"] = latency_ms
-            
-            # Prepare result dict
-            result = {
-                "eval_result_id": str(uuid.uuid4()),
-                "run_id": run_id, # Our app's run_id
-                "mlflow_run_id": run_id_mlflow, # The specific child run
-                "project": project_name,
-                "strategy": strategy_name,
-                "query_text": query_text,
-                "metrics": json.dumps(metrics),
-                "created_at": time.time()
-            }
-            strategy_results.append(result)
-            
-        except Exception as e:
-            print(f"  ❌ Error query {query_id}: {e}")
-
-    # Aggregation
-    if strategy_results:
-        # Simple aggregation for logging
-        avg_recall_10 = sum([json.loads(r["metrics"]).get("recall_at_10", 0) for r in strategy_results]) / len(strategy_results)
-        avg_ndcg_10 = sum([json.loads(r["metrics"]).get("ndcg_at_10", 0) for r in strategy_results]) / len(strategy_results)
-        avg_latency = sum([r["metrics"] for r in strategy_results], 0) # simplified, fix below
-        
-        # Re-calc properly
-        recalls = [json.loads(r["metrics"]).get("recall_at_10", 0) for r in strategy_results]
-        ndcgs = [json.loads(r["metrics"]).get("ndcg_at_10", 0) for r in strategy_results]
-        latencies = [json.loads(r["metrics"]).get("retrieval_latency_ms", 0) for r in strategy_results]
-        
-        avg_recall_10 = sum(recalls) / len(recalls) if recalls else 0
-        avg_ndcg_10 = sum(ndcgs) / len(ndcgs) if ndcgs else 0
-        avg_latency = sum(latencies) / len(latencies) if latencies else 0
-        
-        print(f"  ✅ Logging Metrics to Child Run {run_id_mlflow}")
-        print(f"     Recall@10: {avg_recall_10:.4f}")
-        print(f"     NDCG@10:   {avg_ndcg_10:.4f}")
-        
-        # Log to EXISTING Child Run
-        client.log_metric(run_id_mlflow, "recall_at_10", avg_recall_10)
-        client.log_metric(run_id_mlflow, "ndcg_at_10", avg_ndcg_10)
-        client.log_metric(run_id_mlflow, "avg_latency_ms", avg_latency)
-        
-        all_results.extend(strategy_results)
-        
-    print(f"Completed {strategy_name}")
+if build_child_runs.empty:
+    raise ValueError(f"No build strategy runs found for build_run_id={build_run_id}")
 
 # COMMAND ----------
+evaluator = RetrievalEvaluator()
 
-# Write results to Delta (optional, but good for raw data backup)
-if all_results:
-    from pyspark.sql.functions import current_timestamp as spark_current_timestamp
-    # Convert list of dicts to RDD/DF - handle potential schema issues by being explicit or using JSON
-    # For MVP, simpler to just assume consistent schema
-    try:
-        results_df = spark.createDataFrame(all_results)
-        results_df = results_df.withColumn("created_at", spark_current_timestamp())
-        results_df.write.format("delta").mode("append").saveAsTable(f"{catalog}.{schema}.rl_eval_results")
-        print(f"Wrote {len(all_results)} evaluation results to Delta (backup)")
-    except Exception as e:
-        print(f"⚠️ Failed to write to Delta: {e}")
+eval_results_table = core_config.eval_results_table()
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {eval_results_table} (
+  eval_result_id STRING,
+  build_run_id STRING,
+  eval_run_id STRING,
+  build_child_run_id STRING,
+  project STRING,
+  strategy STRING,
+  query_text STRING,
+  metrics STRING,
+  created_at TIMESTAMP
+)
+USING DELTA
+""")
 
-# Generating Leaderboard - DEPRECATED in favor of MLflow UI
-# But we can print a simple text summary
-print("\n" + "="*80)
-print("EVALUATION COMPLETE - View Results in MLflow Experiments UI")
-print("="*80)
-print(f"Go to Experiment: {experiment_name}")
-print("Use 'Compare Runs' to see Leaderboard with Recall/NDCG.")
+# COMMAND ----------
+all_rows = []
+
+with mlflow.start_run(run_name=f"eval_{build_run_id[:8]}") as eval_parent:
+    mlflow.set_tag("rs_role", "eval_parent")
+    mlflow.log_param("build_run_id", build_run_id)
+    mlflow.log_param("project_name", project_name)
+    mlflow.log_param("queries_table", queries_table)
+    mlflow.log_param("top_k", str(top_k))
+
+    for _, r in build_child_runs.iterrows():
+        build_child_run_id = r.run_id
+        strategy_name = r.get("params.strategy_name")
+        index_name = r.get("params.vs_index_name")
+        vs_endpoint = r.get("params.vs_endpoint")
+
+        if not (strategy_name and index_name and vs_endpoint):
+            continue
+
+        with mlflow.start_run(run_name=f"eval_{strategy_name}", nested=True) as eval_child:
+            mlflow.set_tag("rs_role", "eval_strategy")
+            mlflow.log_param("build_run_id", build_run_id)
+            mlflow.log_param("build_child_run_id", build_child_run_id)
+            mlflow.log_param("strategy_name", strategy_name)
+            mlflow.log_param("vs_endpoint", vs_endpoint)
+            mlflow.log_param("vs_index_name", index_name)
+
+            recalls, ndcgs, latencies = [], [], []
+
+            for qr in query_rows:
+                qtext = qr["query_text"]
+                expected_raw = qr["expected_chunks"] if "expected_chunks" in qr.asDict() else None
+
+                expected_ids = None
+                if expected_raw is not None:
+                    if isinstance(expected_raw, str):
+                        try:
+                            expected_ids = json.loads(expected_raw)
+                        except:
+                            expected_ids = None
+                    else:
+                        expected_ids = expected_raw
+
+                t0 = time.time()
+                retrieved = query_index(
+                    vs_client=vs_client,
+                    endpoint_name=vs_endpoint,
+                    index_name=index_name,
+                    query_text=qtext,
+                    k=top_k,
+                )
+                latency_ms = (time.time() - t0) * 1000.0
+
+                if expected_ids:
+                    metrics = evaluator.compute_labeled_metrics(qtext, retrieved, expected_ids, k_values=[10])
+                else:
+                    metrics = evaluator.compute_judge_metrics(qtext, retrieved, k_values=[10])
+
+                metrics["retrieval_latency_ms"] = latency_ms
+
+                recalls.append(float(metrics.get("recall_at_10", 0.0)))
+                ndcgs.append(float(metrics.get("ndcg_at_10", 0.0)))
+                latencies.append(float(metrics.get("retrieval_latency_ms", 0.0)))
+
+                all_rows.append({
+                    "eval_result_id": str(uuid.uuid4()),
+                    "build_run_id": build_run_id,
+                    "eval_run_id": eval_child.info.run_id,
+                    "build_child_run_id": build_child_run_id,
+                    "project": project_name,
+                    "strategy": strategy_name,
+                    "query_text": qtext,
+                    "metrics": json.dumps(metrics),
+                })
+
+            mlflow.log_metric("recall_at_10", sum(recalls)/len(recalls) if recalls else 0.0)
+            mlflow.log_metric("ndcg_at_10", sum(ndcgs)/len(ndcgs) if ndcgs else 0.0)
+            mlflow.log_metric("avg_latency_ms", sum(latencies)/len(latencies) if latencies else 0.0)
+
+if all_rows:
+    df = spark.createDataFrame(all_rows).withColumn("created_at", current_timestamp())
+    df.write.format("delta").mode("append").saveAsTable(eval_results_table)
+
+dbutils.notebook.exit(json.dumps({
+    "build_run_id": build_run_id,
+    "experiment": experiment_name,
+    "num_strategy_runs": int(len(build_child_runs)),
+    "num_eval_rows": len(all_rows),
+}))

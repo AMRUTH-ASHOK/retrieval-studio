@@ -1,49 +1,37 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # Retrieval Studio - Build Job (MVP)
-# MAGIC Orchestrates data loading, chunking strategies, Delta writes, and optional Vector Search index creation.
+# MAGIC # Retrieval Studio - Build Job (Product)
 
 # COMMAND ----------
-
 # MAGIC %pip install databricks-vectorsearch mlflow --quiet
-
 # COMMAND ----------
-
 dbutils.library.restartPython()
 
 # COMMAND ----------
-
 dbutils.widgets.text("run_id", "")
 dbutils.widgets.text("config", "{}")
-dbutils.widgets.text("catalog", "main")
-dbutils.widgets.text("schema", "retrieval_studio")
+dbutils.widgets.text("catalog", "")
+dbutils.widgets.text("schema", "")
 
 # COMMAND ----------
-
-import json
-import sys
-import os
-import re
-import uuid
-import traceback
+import json, re, uuid, traceback
 from pyspark.sql import SparkSession
-from databricks.vector_search.client import VectorSearchClient
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType
+from pyspark.sql.functions import current_timestamp, col, lit
 
-spark = SparkSession.builder.getOrCreate()
-vs_client = VectorSearchClient()
+# COMMAND ----------
+import os
+import sys
 
-# Robustly find project root
 current_dir = os.getcwd()
 parent_dir = os.path.dirname(current_dir)
-
-# Check logic for finding the 'retrieval_core' package
-project_root = None
-if os.path.isdir(os.path.join(current_dir, "retrieval_core")):
-    project_root = current_dir
-elif os.path.isdir(os.path.join(parent_dir, "retrieval_core")):
-    project_root = parent_dir
+# Check logic for finding the 'retrieval_core' package 
+project_root = None 
+if os.path.isdir(os.path.join(current_dir, "retrieval_core")): 
+    project_root = current_dir 
+elif os.path.isdir(os.path.join(parent_dir, "retrieval_core")): 
+    project_root = parent_dir 
 else:
-    # Walk up to find 'retrieval_core'
     p = current_dir
     for _ in range(4):
         if os.path.isdir(os.path.join(p, "retrieval_core")):
@@ -54,253 +42,254 @@ else:
         project_root = parent_dir
 
 print(f"Using Project Root: {project_root}")
+
 if project_root not in sys.path:
     # Use insert(0) to prioritize our project root over system paths
     sys.path.insert(0, project_root)
 
 # COMMAND ----------
-
-# Imports from your project
-# Imports from your project
 from retrieval_core.strategies import get_strategy
 from retrieval_core.data_types import get_data_type_handler, Document
 from retrieval_core.configs import config as core_config
+
+# Apply catalog/schema overrides from widgets
+catalog_override = dbutils.widgets.get("catalog")
+schema_override = dbutils.widgets.get("schema")
+
+if catalog_override:
+    type(core_config).UC_CATALOG = catalog_override
+if schema_override:
+    type(core_config).RAW_SCHEMA = schema_override
+
+from databricks.vector_search.client import VectorSearchClient
 from utils.vs_utils import create_vs_index, wait_for_index
 
+vs_client = VectorSearchClient()
+
 # COMMAND ----------
+def ensure_uc_schemas():
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {core_config.fq_schema(core_config.RAW_SCHEMA)}")
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {core_config.fq_schema(core_config.CHUNKS_SCHEMA)}")
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {core_config.fq_schema(core_config.INDEXES_SCHEMA)}")
 
 def safe_ident(s: str) -> str:
-    """Make a string safe for table/index suffixes."""
-    s = s.strip()
-    s = s.replace("-", "_")
+    s = (s or "").strip().replace("-", "_")
     s = re.sub(r"[^a-zA-Z0-9_]", "_", s)
-    return s[:120]  # keep it reasonable
+    return s[:120] or "default"
 
-def ensure_schema(catalog: str, schema: str):
-    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{schema}")
+CHUNKS_SCHEMA = StructType([
+    StructField("chunk_id", StringType(), False),
+    StructField("doc_id", StringType(), True),
+    StructField("doc_name", StringType(), True),
+    StructField("chunk_text", StringType(), True),
+    StructField("chunk_index", IntegerType(), True),
+    StructField("metadata_json", StringType(), True),
+    StructField("chunk_type", StringType(), True),
+    StructField("parent_chunk_id", StringType(), True),
+    StructField("run_id", StringType(), False),
+    StructField("project", StringType(), False),
+    StructField("strategy", StringType(), False),
+    StructField("created_at", StringType(), True),  # replaced with timestamp below
+])
 
 # COMMAND ----------
-
-# Parse parameters (Defaults from Config)
 run_id = dbutils.widgets.get("run_id") or str(uuid.uuid4())
-catalog = dbutils.widgets.get("catalog") or core_config.CATALOG
-schema = dbutils.widgets.get("schema") or core_config.SCHEMA
 config_json = dbutils.widgets.get("config") or "{}"
-
 config = json.loads(config_json)
 
-print(f"Run ID: {run_id}")
-print(f"Using Catalog: {catalog}, Schema: {schema}")
-print(json.dumps(config, indent=2))
-
-ensure_schema(catalog, schema)
-
-# COMMAND ----------
-
-# Step 1: Load Documents
-print("=" * 80)
-print("STEP 1: Loading Documents")
-print("=" * 80)
-
+project_name = config.get("project_name", "default")
 data_type = config.get("data_type", "pdf")
 data_config = config.get("data_config", {})
+strategies_config = config.get("strategies", {})
 
-documents = []
+vs_endpoint_name = config.get("vs_endpoint_name")
+embedding_model_endpoint = config.get("embedding_model_endpoint")
+create_index_flag = bool(config.get("create_index", True))
+wait_ready = bool(config.get("wait_for_index", False))
 
-try:
-    handler = get_data_type_handler(data_type)
-
-    if data_type == "delta_table":
-        table_name = data_config.get("table_name", "")
-        text_column = data_config.get("text_column", "text")
-        id_column = data_config.get("id_column")  # optional
-        max_rows = int(data_config.get("max_rows", 2000))  # safety for MVP
-
-        df = spark.table(table_name).select(
-            *([id_column] if id_column else []),
-            text_column
-        ).limit(max_rows)
-
-        for row in df.toLocalIterator():  # streaming, safer than collect()
-            row_dict = row.asDict()
-            doc_id = str(row_dict.get(id_column)) if id_column else str(uuid.uuid4())
-            text = row_dict.get(text_column)
-            if text is None:
-                continue
-
-            documents.append(
-                Document(
-                    doc_id=doc_id,
-                    doc_name=f"{table_name}:{doc_id}",
-                    text=str(text),
-                    metadata={"source_table": table_name},
-                    data_type="delta_table",
-                )
-            )
-
-    else:
-        # Other types handled by your handler (pdf, uc_volume, plain_text, csv, json, etc.)
-        documents = handler.load_documents(data_config)
-
-    if not documents:
-        raise ValueError("No documents were loaded. Check your data configuration.")
-
-    print(f"✅ Loaded {len(documents)} documents")
-    print(f"Sample: {documents[0].doc_name} (chars={len(documents[0].text)})")
-
-except Exception as e:
-    print(f"❌ Error loading documents: {e}")
-    traceback.print_exc()
-    raise
+ensure_uc_schemas()
 
 # COMMAND ----------
+# Load documents
+handler = get_data_type_handler(data_type)
+documents = []
 
-# Step 2 & 3: Process strategies with Nested MLflow Runs
-print("\n" + "=" * 80)
-print("STEP 2 & 3: Chunk + Index + Login (Nested Runs)")
-print("=" * 80)
+if data_type == "delta_table":
+    table_name = data_config.get("table_name", "")
+    text_column = data_config.get("text_column", "text")
+    id_column = data_config.get("id_column")
+    max_rows = int(data_config.get("max_rows", 2000))
 
-strategies_config = config.get("strategies", {})  # {strategy_name: params}
-embedding_model_endpoint = config.get("embedding_model_endpoint")
-vs_endpoint_name = config.get("vs_endpoint_name")
-project_name = config.get("project_name", "default")
+    df = spark.table(table_name).select(
+        *([id_column] if id_column else []),
+        text_column
+    ).limit(max_rows)
 
-run_suffix = safe_ident(run_id)
+    for row in df.toLocalIterator():
+        rd = row.asDict()
+        doc_id = str(rd.get(id_column)) if id_column else str(uuid.uuid4())
+        text = rd.get(text_column)
+        if text is None:
+            continue
+        documents.append(Document(
+            doc_id=doc_id,
+            doc_name=f"{table_name}:{doc_id}",
+            text=str(text),
+            metadata={"source_table": table_name},
+            data_type="delta_table",
+        ))
+else:
+    documents = handler.load_documents(data_config)
 
-print(f"Strategies: {list(strategies_config.keys())}")
-print(f"VS endpoint: {vs_endpoint_name}")
-print(f"Embedding endpoint: {embedding_model_endpoint}")
+if not documents:
+    raise ValueError("No documents loaded. Check data_config.")
+
+doc_dicts = [{"doc_id": d.doc_id, "doc_name": d.doc_name, "text": d.text, "metadata": d.metadata} for d in documents]
+
+# COMMAND ----------
+# Index registry table
+index_registry = core_config.index_registry_table()
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {index_registry} (
+  project STRING,
+  strategy STRING,
+  vs_endpoint STRING,
+  index_name STRING,
+  source_table STRING,
+  embedding_endpoint STRING,
+  updated_at TIMESTAMP
+)
+USING DELTA
+""")
+
+# COMMAND ----------
+import mlflow
+experiment_name = core_config.get_experiment_name(project_name)
+mlflow.set_experiment(experiment_name)
 
 strategy_results = {}
 
-# Convert Document objects to dicts
-doc_dicts = [
-    {"doc_id": d.doc_id, "doc_name": d.doc_name, "text": d.text, "metadata": d.metadata}
-    for d in documents
-]
+with mlflow.start_run(run_name=f"build_{run_id[:8]}") as parent_run:
+    mlflow.set_tag("rs_role", "build_parent")
+    mlflow.log_param("build_run_id", str(run_id))
+    mlflow.log_param("project_name", project_name)
+    mlflow.log_param("data_type", data_type)
+    mlflow.log_param("num_documents", str(len(documents)))
+    mlflow.log_param("strategies", json.dumps(list(strategies_config.keys())))
+    mlflow.log_dict(config, "build_config.json")
 
-try:
-    import mlflow
-    # Use centralized config for experiment path
-    experiment_name = core_config.get_experiment_name(project_name)
-    
-    mlflow.set_experiment(experiment_name)
-    
-    # Start Parent Run for the Build Job
-    with mlflow.start_run(run_name=f"build_{run_id[:8]}") as parent_run:
-        print(f"🚀 Started Parent Run: {parent_run.info.run_id}")
-        
-        # Log Parent Params
-        mlflow.log_param("build_run_id", run_id)
-        mlflow.log_param("data_type", str(data_type))
-        mlflow.log_param("num_documents", str(len(documents)))
-        mlflow.log_param("strategies_list", json.dumps(list(strategies_config.keys())))
-        mlflow.log_dict(config, "build_config.json")
-        mlflow.set_tag("retrieval_studio_type", "build_parent")
-        
-        # Iterate Strategies (Child Runs)
-        for strategy_name, strategy_params in strategies_config.items():
-            print(f"\n{'='*60}\nStrategy: {strategy_name}\n{'='*60}")
-            
-            with mlflow.start_run(run_name=f"strat_{strategy_name}", nested=True) as child_run:
-                print(f"  ↳ Started Child Run: {child_run.info.run_id}")
-                
-                try:
-                    # Log Strategy Params
-                    mlflow.log_param("strategy_name", strategy_name)
-                    mlflow.log_param("build_run_id", run_id)  # Critical for discovery
-                    for k, v in (strategy_params or {}).items():
-                        mlflow.log_param(f"strat_{k}", v)
-                    
-                    # 1. Chunking
-                    strategy = get_strategy(strategy_name, **(strategy_params or {}))
-                    chunks = strategy.chunk(doc_dicts)
-                    print(f"  ✅ Chunks created: {len(chunks)}")
-                    mlflow.log_metric("num_chunks", len(chunks))
-                    
-                    # 2. Persist Chunks to Delta
-                    chunks_table = f"{catalog}.{schema}.rl_chunks_{safe_ident(strategy_name)}_{run_suffix}"
-                    print(f"  💾 Writing chunks table: {chunks_table}")
-                    
-                    chunk_rows = []
-                    for c in chunks:
-                        meta = {k: (v if isinstance(v, str) else json.dumps(v)) for k, v in (c.metadata or {}).items()}
-                        chunk_rows.append({
-                            "chunk_id": c.chunk_id,
-                            "doc_id": c.doc_id,
-                            "doc_name": c.doc_name,
-                            "chunk_text": c.chunk_text,
-                            "chunk_index": int(getattr(c, "chunk_index", 0)),
-                            "metadata": meta, 
-                            "parent_chunk_id": getattr(c, "parent_chunk_id", None),
-                            "run_id": run_id,
-                            "strategy": strategy_name,
-                        })
-                    
-                    chunks_df = spark.createDataFrame(chunk_rows)
-                    (chunks_df.write.format("delta")
-                        .mode("overwrite")
-                        .option("overwriteSchema", "true")
-                        .saveAsTable(chunks_table))
-                    
-                    mlflow.log_param("chunks_table", chunks_table)
-                    
-                    # 3. Create Vector Search Index (MANDATORY)
-                    index_name = f"{catalog}.{schema}.rl_index_{safe_ident(strategy_name)}_{run_suffix}"
-                    print(f"  🔍 Creating Vector Search index: {index_name}")
-                    
-                    if embedding_model_endpoint and vs_endpoint_name:
-                        create_vs_index(
-                            vs_client=vs_client,
-                            endpoint_name=vs_endpoint_name,
-                            index_name=index_name,
-                            primary_key="chunk_id",
-                            source_table_name=chunks_table,
-                            embedding_source_column="chunk_text",
-                            embedding_model_endpoint_name=embedding_model_endpoint,
-                        )
-                        # Log Index Artifacts to Child Run
-                        mlflow.log_param("vs_index_name", index_name)
-                        mlflow.log_param("vs_endpoint", vs_endpoint_name)
-                        mlflow.log_param("embedding_endpoint", embedding_model_endpoint)
-                        mlflow.set_tag("retrieval_studio_type", "strategy_child")
-                        
-                        strategy_results[strategy_name] = {
-                            "status": "SUCCESS",
-                            "num_chunks": len(chunks),
-                            "index_name": index_name,
-                            "mlflow_run_id": child_run.info.run_id
-                        }
+    for strategy_name, strategy_params in strategies_config.items():
+        with mlflow.start_run(run_name=f"build_{strategy_name}", nested=True) as child_run:
+            mlflow.set_tag("rs_role", "build_strategy")
+            mlflow.log_param("build_run_id", str(run_id))
+            mlflow.log_param("strategy_name", strategy_name)
+
+            for k, v in (strategy_params or {}).items():
+                mlflow.log_param(f"strat_{k}", v if isinstance(v, str) else json.dumps(v))
+
+            try:
+                strat = get_strategy(strategy_name, **(strategy_params or {}))
+                chunks = strat.chunk(doc_dicts)
+                mlflow.log_metric("num_chunks", float(len(chunks)))
+
+                chunks_table = core_config.chunks_table(project_name, strategy_name)
+
+                rows = []
+                for c in chunks:
+                    meta = c.metadata or {}
+                    chunk_type = meta.get("chunk_type")
+                    rows.append({
+                        "chunk_id": c.chunk_id,
+                        "doc_id": c.doc_id,
+                        "doc_name": c.doc_name,
+                        "chunk_text": c.chunk_text,
+                        "chunk_index": int(getattr(c, "chunk_index", 0)),
+                        "metadata_json": json.dumps(meta),
+                        "chunk_type": chunk_type,
+                        "parent_chunk_id": getattr(c, "parent_chunk_id", None),
+                        "run_id": run_id,
+                        "project": project_name,
+                        "strategy": strategy_name,
+                        "created_at": None,
+                    })
+
+                df = spark.createDataFrame(rows, schema=CHUNKS_SCHEMA).drop("created_at").withColumn("created_at", current_timestamp())
+
+                # first write creates table (partitioned), later writes overwrite run partition
+                if spark.catalog.tableExists(chunks_table):
+                    (df.write.format("delta")
+                       .mode("overwrite")
+                       .option("replaceWhere", f"run_id = '{run_id}'")
+                       .saveAsTable(chunks_table))
+                else:
+                    (df.write.format("delta")
+                       .mode("overwrite")
+                       .partitionBy("run_id")
+                       .saveAsTable(chunks_table))
+
+                # choose index source table
+                source_for_index = chunks_table
+                if strategy_name == "parent_child":
+                    # children-only indexable table
+                    indexable_table = core_config.chunks_indexable_table(project_name, strategy_name)
+                    children_df = df.filter(col("chunk_type") == lit("child"))
+
+                    if spark.catalog.tableExists(indexable_table):
+                        (children_df.write.format("delta")
+                           .mode("overwrite")
+                           .option("replaceWhere", f"run_id = '{run_id}'")
+                           .saveAsTable(indexable_table))
                     else:
-                        raise ValueError("Missing embedding_model_endpoint or vs_endpoint_name config")
+                        (children_df.write.format("delta")
+                           .mode("overwrite")
+                           .partitionBy("run_id")
+                           .saveAsTable(indexable_table))
 
-                except Exception as e:
-                    print(f"  ❌ Strategy failed: {strategy_name}: {e}")
-                    traceback.print_exc()
-                    mlflow.set_tag("status", "FAILED")
-                    mlflow.log_text(str(e), "error.txt")
-                    strategy_results[strategy_name] = {"status": "FAILED", "error": str(e)}
+                    source_for_index = indexable_table
 
-except Exception as e:
-    print(f"❌ MLflow/Job failed: {e}")
-    traceback.print_exc()
-    raise
+                # stable index name
+                index_name = core_config.index_name(project_name, strategy_name)
 
-# COMMAND ----------
+                if create_index_flag:
+                    if not (vs_endpoint_name and embedding_model_endpoint):
+                        raise ValueError("Missing vs_endpoint_name or embedding_model_endpoint")
 
-# Summary + exit
-print("\n" + "=" * 80)
-print("BUILD SUMMARY")
-print("=" * 80)
+                    create_vs_index(
+                        vs_client=vs_client,
+                        endpoint_name=vs_endpoint_name,
+                        index_name=index_name,
+                        source_table_name=source_for_index,
+                        embedding_model_endpoint_name=embedding_model_endpoint,
+                    )
+                    if wait_ready:
+                        wait_for_index(vs_client, vs_endpoint_name, index_name)
 
-final_state = "SUCCESS" if all(r["status"] != "FAILED" for r in strategy_results.values()) else "PARTIAL_SUCCESS"
+                # update registry (simple delete+insert)
+                spark.sql(f"DELETE FROM {index_registry} WHERE project = '{project_name}' AND strategy = '{strategy_name}'")
+                spark.sql(f"""
+                  INSERT INTO {index_registry}
+                  VALUES ('{project_name}', '{strategy_name}', '{vs_endpoint_name}', '{index_name}', '{source_for_index}', '{embedding_model_endpoint}', current_timestamp())
+                """)
 
-print(f"Run: {run_id}")
-print(f"Final: {final_state}")
-print(json.dumps(strategy_results, indent=2))
+                mlflow.log_param("chunks_table", chunks_table)
+                mlflow.log_param("index_source_table", source_for_index)
+                mlflow.log_param("vs_endpoint", vs_endpoint_name)
+                mlflow.log_param("vs_index_name", index_name)
+                mlflow.log_param("embedding_endpoint", embedding_model_endpoint)
 
-dbutils.notebook.exit(json.dumps({
-    "run_id": run_id,
-    "status": final_state,
-    "results": strategy_results
-}))
+                strategy_results[strategy_name] = {
+                    "status": "SUCCESS",
+                    "num_chunks": len(chunks),
+                    "chunks_table": chunks_table,
+                    "index_source_table": source_for_index,
+                    "index_name": index_name,
+                    "mlflow_run_id": child_run.info.run_id,
+                }
+
+            except Exception as e:
+                mlflow.set_tag("status", "FAILED")
+                mlflow.log_text(str(e), "error.txt")
+                strategy_results[strategy_name] = {"status": "FAILED", "error": str(e), "mlflow_run_id": child_run.info.run_id}
+
+final_state = "SUCCESS" if all(v["status"] != "FAILED" for v in strategy_results.values()) else "PARTIAL_SUCCESS"
+dbutils.notebook.exit(json.dumps({"run_id": run_id, "status": final_state, "results": strategy_results}))
