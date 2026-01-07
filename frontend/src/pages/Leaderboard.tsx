@@ -1,47 +1,331 @@
-import { Box, Typography, Paper, Link, Button } from '@mui/material'
-import OpenInNewIcon from '@mui/icons-material/OpenInNew'
+import { useState, useEffect } from 'react'
+import { Trophy, TrendingUp, Clock, Target } from 'lucide-react'
+import { leaderboardApi } from '../services/leaderboard'
+import { buildsApi } from '../services/builds'
+import { useProject } from '../context/ProjectContext'
+import { Select } from '../components/ui/Select'
+import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/Card'
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '../components/ui/Table'
+import { Badge } from '../components/ui/Badge'
+import { LeaderboardEntry, BuildJob } from '../types'
 
 export default function Leaderboard() {
+  const { selectedProject, selectedProjectId } = useProject()
+  const [builds, setBuilds] = useState<BuildJob[]>([])
+  const [selectedRun, setSelectedRun] = useState('')
+  const [leaderboardData, setLeaderboardData] = useState<LeaderboardEntry[]>([])
+  const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (selectedProjectId) {
+      loadBuilds()
+    }
+  }, [selectedProjectId])
+
+  useEffect(() => {
+    if (selectedRun) {
+      loadLeaderboard()
+    }
+  }, [selectedRun])
+
+  const loadBuilds = async () => {
+    try {
+      const buildsData = await buildsApi.list()
+      const projectBuilds = buildsData.filter(
+        (b: BuildJob) => b.project_id === selectedProjectId && b.state === 'SUCCESS'
+      )
+      setBuilds(projectBuilds)
+      if (projectBuilds.length > 0 && !selectedRun) {
+        setSelectedRun(projectBuilds[0].run_id)
+      }
+    } catch (error) {
+      console.error('Failed to load builds:', error)
+      setError('Failed to load builds')
+    }
+  }
+
+  const loadLeaderboard = async () => {
+    setIsLoading(true)
+    setError('')
+    try {
+      const data = await leaderboardApi.get(selectedRun)
+      setLeaderboardData(data)
+    } catch (error) {
+      console.error('Failed to load leaderboard:', error)
+      setError('Failed to load leaderboard data')
+      setLeaderboardData([])
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  const getBestStrategy = (metric: keyof LeaderboardEntry) => {
+    if (leaderboardData.length === 0) return null
+    return leaderboardData.reduce((best, current) => {
+      const currentValue = current[metric] as number
+      const bestValue = best[metric] as number
+      return currentValue > bestValue ? current : best
+    })
+  }
+
+  const formatMetric = (value: number | null | undefined, decimals = 3) => {
+    if (value === null || value === undefined) return '-'
+    return value.toFixed(decimals)
+  }
+
+  const getTopPerformer = () => {
+    if (leaderboardData.length === 0) return null
+    // Calculate average of all metrics for ranking
+    return leaderboardData.reduce((best, current) => {
+      const currentAvg =
+        ((current.avg_recall_at_5 || 0) +
+          (current.avg_recall_at_10 || 0) +
+          (current.avg_ndcg_at_5 || 0) +
+          (current.avg_ndcg_at_10 || 0)) /
+        4
+      const bestAvg =
+        ((best.avg_recall_at_5 || 0) +
+          (best.avg_recall_at_10 || 0) +
+          (best.avg_ndcg_at_5 || 0) +
+          (best.avg_ndcg_at_10 || 0)) /
+        4
+      return currentAvg > bestAvg ? current : best
+    })
+  }
+
+  const topPerformer = getTopPerformer()
+
   return (
-    <Box>
-      <Typography variant="h4" gutterBottom>
-        Leaderboard
-      </Typography>
+    <div>
+      <div className="mb-6">
+        <h1 className="text-2xl font-semibold text-databricks-gray-900">Leaderboard</h1>
+        <p className="text-sm text-databricks-gray-600 mt-1">
+          Compare retrieval strategy performance across metrics
+        </p>
+      </div>
 
-      <Paper sx={{ p: 4, mt: 3, textAlign: 'center' }}>
-        <Typography variant="h6" gutterBottom>
-          View Results in MLflow Experiments
-        </Typography>
-        
-        <Typography variant="body1" paragraph color="text.secondary" sx={{ mb: 4 }}>
-          We have moved the leaderboard to the native Databricks MLflow UI. 
-          This allows you to compare runs, visualize metrics (Recall vs NDCG), and drill down into strategy parameters side-by-side.
-        </Typography>
+      {!selectedProjectId && (
+        <div className="mb-6 p-4 bg-yellow-50 border border-yellow-200 rounded-md">
+          <p className="text-sm text-yellow-800">
+            Please select a project from the sidebar to view leaderboard.
+          </p>
+        </div>
+      )}
 
-        <Button 
-          variant="contained" 
-          color="primary" 
-          endIcon={<OpenInNewIcon />}
-          href="/#mlflow/experiments" 
-          target="_blank"
-          size="large"
-        >
-          Go to MLflow Experiments
-        </Button>
+      {selectedProject && (
+        <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-md">
+          <p className="text-sm text-blue-900">
+            <span className="font-medium">Current project:</span> {selectedProject.project_name}
+          </p>
+        </div>
+      )}
 
-        <Box sx={{ mt: 4, p: 2, bgcolor: 'background.default', borderRadius: 1, textAlign: 'left' }}>
-          <Typography variant="subtitle2" gutterBottom>
-            How to compare strategies:
-          </Typography>
-          <ol>
-            <li>Navigate to the <strong>Experiments</strong> tab in Databricks.</li>
-            <li>Select your Project Experiment.</li>
-            <li>In the "Runs" table, select the child runs you want to compare.</li>
-            <li>Click the blue <strong>"Compare"</strong> button.</li>
-            <li>Use the "Parallel Coordinates Plot" or "Scatter Plot" to analyze performance.</li>
-          </ol>
-        </Box>
-      </Paper>
-    </Box>
+      {/* Run Selector */}
+      {builds.length > 0 && (
+        <Card className="mb-6">
+          <Select
+            label="Select Build Run"
+            value={selectedRun}
+            onChange={(e) => setSelectedRun(e.target.value)}
+            options={builds.map((build) => ({
+              value: build.run_id,
+              label: `${build.run_id.substring(0, 12)}... - ${new Date(
+                build.created_at
+              ).toLocaleDateString()}`,
+            }))}
+          />
+        </Card>
+      )}
+
+      {/* Metrics Summary */}
+      {leaderboardData.length > 0 && topPerformer && (
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+          <Card>
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-sm font-medium text-databricks-gray-600">
+                  Top Strategy
+                </CardTitle>
+                <Trophy className="w-5 h-5 text-databricks-warning" />
+              </div>
+            </CardHeader>
+            <CardContent>
+              <p className="text-2xl font-semibold text-databricks-gray-900">
+                {topPerformer.strategy}
+              </p>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-sm font-medium text-databricks-gray-600">
+                  Best Recall@5
+                </CardTitle>
+                <TrendingUp className="w-5 h-5 text-databricks-success" />
+              </div>
+            </CardHeader>
+            <CardContent>
+              <p className="text-2xl font-semibold text-databricks-gray-900">
+                {formatMetric(getBestStrategy('avg_recall_at_5')?.avg_recall_at_5)}
+              </p>
+              <p className="text-xs text-databricks-gray-500 mt-1">
+                {getBestStrategy('avg_recall_at_5')?.strategy}
+              </p>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-sm font-medium text-databricks-gray-600">
+                  Best NDCG@5
+                </CardTitle>
+                <Target className="w-5 h-5 text-databricks-blue" />
+              </div>
+            </CardHeader>
+            <CardContent>
+              <p className="text-2xl font-semibold text-databricks-gray-900">
+                {formatMetric(getBestStrategy('avg_ndcg_at_5')?.avg_ndcg_at_5)}
+              </p>
+              <p className="text-xs text-databricks-gray-500 mt-1">
+                {getBestStrategy('avg_ndcg_at_5')?.strategy}
+              </p>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-sm font-medium text-databricks-gray-600">
+                  Fastest
+                </CardTitle>
+                <Clock className="w-5 h-5 text-databricks-primary" />
+              </div>
+            </CardHeader>
+            <CardContent>
+              <p className="text-2xl font-semibold text-databricks-gray-900">
+                {formatMetric(
+                  Math.min(...leaderboardData.map((d) => d.avg_latency_ms || Infinity)),
+                  0
+                )}
+                ms
+              </p>
+              <p className="text-xs text-databricks-gray-500 mt-1">
+                {
+                  leaderboardData.reduce((fastest, current) =>
+                    (current.avg_latency_ms || Infinity) < (fastest.avg_latency_ms || Infinity)
+                      ? current
+                      : fastest
+                  ).strategy
+                }
+              </p>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/* Leaderboard Table */}
+      {isLoading ? (
+        <Card>
+          <div className="flex justify-center items-center py-12">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-databricks-blue"></div>
+          </div>
+        </Card>
+      ) : error ? (
+        <Card>
+          <div className="text-center py-12">
+            <p className="text-sm text-databricks-error">{error}</p>
+          </div>
+        </Card>
+      ) : leaderboardData.length === 0 ? (
+        <Card>
+          <div className="text-center py-12">
+            <div className="w-16 h-16 mx-auto mb-4 bg-databricks-gray-100 rounded-full flex items-center justify-center">
+              <Trophy className="w-8 h-8 text-databricks-gray-400" />
+            </div>
+            <h3 className="text-lg font-medium text-databricks-gray-900 mb-2">
+              No evaluation results yet
+            </h3>
+            <p className="text-sm text-databricks-gray-600">
+              Run an evaluation to see strategy comparisons
+            </p>
+          </div>
+        </Card>
+      ) : (
+        <Card padding={false}>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Rank</TableHead>
+                <TableHead>Strategy</TableHead>
+                <TableHead>Recall@5</TableHead>
+                <TableHead>Recall@10</TableHead>
+                <TableHead>NDCG@5</TableHead>
+                <TableHead>NDCG@10</TableHead>
+                <TableHead>Latency (ms)</TableHead>
+                <TableHead>Queries</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {leaderboardData.map((entry, index) => (
+                <TableRow key={entry.strategy}>
+                  <TableCell>
+                    {index === 0 && (
+                      <Trophy className="w-5 h-5 text-databricks-warning inline mr-2" />
+                    )}
+                    <span className="font-medium">#{index + 1}</span>
+                  </TableCell>
+                  <TableCell>
+                    <span className="font-medium text-databricks-gray-900">
+                      {entry.strategy}
+                    </span>
+                  </TableCell>
+                  <TableCell>{formatMetric(entry.avg_recall_at_5)}</TableCell>
+                  <TableCell>{formatMetric(entry.avg_recall_at_10)}</TableCell>
+                  <TableCell>{formatMetric(entry.avg_ndcg_at_5)}</TableCell>
+                  <TableCell>{formatMetric(entry.avg_ndcg_at_10)}</TableCell>
+                  <TableCell>{formatMetric(entry.avg_latency_ms, 0)}</TableCell>
+                  <TableCell>
+                    <Badge variant="default">{entry.num_queries}</Badge>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Card>
+      )}
+
+      {/* Info Box */}
+      {leaderboardData.length > 0 && (
+        <Card className="mt-6 bg-databricks-gray-50">
+          <h3 className="text-sm font-semibold text-databricks-gray-900 mb-3">
+            Understanding Metrics
+          </h3>
+          <ul className="space-y-2 text-sm text-databricks-gray-700">
+            <li className="flex items-start">
+              <span className="mr-2">•</span>
+              <span>
+                <strong>Recall@K:</strong> Proportion of relevant items retrieved in top K results
+              </span>
+            </li>
+            <li className="flex items-start">
+              <span className="mr-2">•</span>
+              <span>
+                <strong>NDCG@K:</strong> Normalized Discounted Cumulative Gain - measures ranking
+                quality
+              </span>
+            </li>
+            <li className="flex items-start">
+              <span className="mr-2">•</span>
+              <span>
+                <strong>Latency:</strong> Average time taken for retrieval in milliseconds
+              </span>
+            </li>
+          </ul>
+        </Card>
+      )}
+    </div>
   )
 }
