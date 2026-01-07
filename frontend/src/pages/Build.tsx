@@ -1,29 +1,13 @@
 import { useState, useEffect } from 'react'
-import {
-  Box,
-  Typography,
-  Button,
-  Paper,
-  Stepper,
-  Step,
-  StepLabel,
-  FormControl,
-  InputLabel,
-  Select,
-  MenuItem,
-  TextField,
-  Grid,
-  Card,
-  CardContent,
-  Checkbox,
-  FormControlLabel,
-  Alert,
-} from '@mui/material'
-import { PlayArrow as PlayIcon } from '@mui/icons-material'
+import { PlayCircle, ChevronRight, ChevronLeft, CheckCircle2 } from 'lucide-react'
 import { buildsApi } from '../services/builds'
 import { metadataApi } from '../services/metadata'
 import { DataType, Strategy } from '../types'
 import { useProject } from '../context/ProjectContext'
+import { Button } from '../components/ui/Button'
+import { Input } from '../components/ui/Input'
+import { Select } from '../components/ui/Select'
+import { Card, CardContent } from '../components/ui/Card'
 
 export default function Build() {
   const { selectedProject, selectedProjectId } = useProject()
@@ -36,8 +20,14 @@ export default function Build() {
   const [vsEndpoint, setVsEndpoint] = useState('')
   const [dataConfig, setDataConfig] = useState<Record<string, any>>({})
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [error, setError] = useState('')
 
-  const steps = ['Select Data Type', 'Configure Data Source', 'Select Strategies', 'Configure & Run']
+  const steps = [
+    { label: 'Select Data Type', number: 1 },
+    { label: 'Configure Data Source', number: 2 },
+    { label: 'Select Strategies', number: 3 },
+    { label: 'Configure & Run', number: 4 },
+  ]
 
   useEffect(() => {
     loadMetadata()
@@ -53,15 +43,16 @@ export default function Build() {
       setStrategies(strategiesData)
     } catch (error) {
       console.error('Failed to load metadata:', error)
+      setError('Failed to load metadata')
     }
   }
 
   const handleNext = () => {
-    setActiveStep((prevStep) => prevStep + 1)
+    setActiveStep((prev) => Math.min(prev + 1, steps.length - 1))
   }
 
   const handleBack = () => {
-    setActiveStep((prevStep) => prevStep - 1)
+    setActiveStep((prev) => Math.max(prev - 1, 0))
   }
 
   const handleStrategyToggle = (strategyName: string) => {
@@ -74,11 +65,13 @@ export default function Build() {
 
   const handleSubmit = async () => {
     if (!selectedProjectId) {
-      alert('Please select a project first')
+      setError('Please select a project first')
       return
     }
 
     setIsSubmitting(true)
+    setError('')
+
     try {
       const config = {
         data_type: selectedDataType,
@@ -97,174 +90,266 @@ export default function Build() {
         config,
       })
 
-      alert('Build job submitted successfully!')
+      // Reset form
       setActiveStep(0)
+      setSelectedDataType('')
+      setSelectedStrategies([])
+      setDataConfig({})
+      setEmbeddingEndpoint('')
+      setVsEndpoint('')
+      
+      alert('Build job submitted successfully!')
     } catch (error) {
       console.error('Failed to submit build job:', error)
-      alert('Failed to submit build job')
+      setError('Failed to submit build job')
     } finally {
       setIsSubmitting(false)
     }
   }
 
-  const selectedDataTypeInfo = dataTypes.find(dt => dt.name === selectedDataType)
+  const selectedDataTypeInfo = dataTypes.find((dt) => dt.name === selectedDataType)
 
   const renderStepContent = (step: number) => {
     switch (step) {
       case 0:
         return (
-          <Box>
-            <FormControl fullWidth>
-              <InputLabel>Data Type</InputLabel>
-              <Select
-                value={selectedDataType}
-                label="Data Type"
-                onChange={(e) => setSelectedDataType(e.target.value)}
-              >
-                {dataTypes.map((dt) => (
-                  <MenuItem key={dt.name} value={dt.name}>
-                    {dt.display_name}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
+          <div className="space-y-4">
+            <Select
+              label="Data Type"
+              value={selectedDataType}
+              onChange={(e) => setSelectedDataType(e.target.value)}
+              options={[
+                { value: '', label: 'Select a data type' },
+                ...dataTypes.map((dt) => ({
+                  value: dt.name,
+                  label: dt.display_name,
+                })),
+              ]}
+              required
+            />
             {selectedDataTypeInfo && (
-              <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
-                Compatible strategies: {selectedDataTypeInfo.compatible_strategies.join(', ')}
-              </Typography>
+              <div className="p-4 bg-databricks-gray-50 rounded-md border border-databricks-gray-200">
+                <p className="text-sm text-databricks-gray-600">
+                  <span className="font-medium">Compatible strategies:</span>{' '}
+                  {selectedDataTypeInfo.compatible_strategies.join(', ')}
+                </p>
+              </div>
             )}
-          </Box>
+          </div>
         )
+
       case 1:
         return (
-          <Box>
-            <Typography variant="h6" gutterBottom>
+          <div className="space-y-4">
+            <h3 className="text-lg font-medium text-databricks-gray-900 mb-4">
               Configure Data Source
-            </Typography>
+            </h3>
             {selectedDataTypeInfo?.input_schema?.fields?.map((field: any) => (
-              <TextField
+              <Input
                 key={field.name}
-                fullWidth
                 label={field.label}
                 placeholder={field.default || ''}
                 required={field.required}
-                sx={{ mb: 2 }}
-                onChange={(e) => setDataConfig(prev => ({ ...prev, [field.name]: e.target.value }))}
+                onChange={(e) =>
+                  setDataConfig((prev) => ({ ...prev, [field.name]: e.target.value }))
+                }
+                value={dataConfig[field.name] || ''}
               />
             ))}
-          </Box>
+          </div>
         )
+
       case 2:
         return (
-          <Box>
-            <Typography variant="h6" gutterBottom>
+          <div className="space-y-4">
+            <h3 className="text-lg font-medium text-databricks-gray-900 mb-4">
               Select Chunking Strategies
-            </Typography>
-            <Grid container spacing={2}>
+            </h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {strategies
-                .filter(s => !selectedDataTypeInfo || selectedDataTypeInfo.compatible_strategies.includes(s.name))
+                .filter(
+                  (s) =>
+                    !selectedDataTypeInfo ||
+                    selectedDataTypeInfo.compatible_strategies.includes(s.name)
+                )
                 .map((strategy) => (
-                <Grid item xs={12} sm={6} md={4} key={strategy.name}>
-                  <Card sx={{ height: '100%' }}>
-                    <CardContent>
-                      <FormControlLabel
-                        control={
-                          <Checkbox
-                            checked={selectedStrategies.includes(strategy.name)}
-                            onChange={() => handleStrategyToggle(strategy.name)}
-                          />
-                        }
-                        label={strategy.display_name}
-                      />
-                      <Typography variant="body2" color="text.secondary">
-                        {strategy.description}
-                      </Typography>
+                  <Card
+                    key={strategy.name}
+                    className={`cursor-pointer transition-all ${
+                      selectedStrategies.includes(strategy.name)
+                        ? 'ring-2 ring-databricks-blue bg-blue-50'
+                        : 'hover:shadow-db-md'
+                    }`}
+                    padding={false}
+                  >
+                    <CardContent className="p-4">
+                      <div className="flex items-start">
+                        <input
+                          type="checkbox"
+                          checked={selectedStrategies.includes(strategy.name)}
+                          onChange={() => handleStrategyToggle(strategy.name)}
+                          className="mt-1 h-4 w-4 text-databricks-blue border-databricks-gray-300 rounded focus:ring-databricks-blue"
+                        />
+                        <div className="ml-3 flex-1">
+                          <label className="font-medium text-databricks-gray-900 cursor-pointer">
+                            {strategy.display_name}
+                          </label>
+                          <p className="text-sm text-databricks-gray-600 mt-1">
+                            {strategy.description}
+                          </p>
+                        </div>
+                      </div>
                     </CardContent>
                   </Card>
-                </Grid>
-              ))}
-            </Grid>
-          </Box>
+                ))}
+            </div>
+          </div>
         )
+
       case 3:
         return (
-          <Box>
-            <Typography variant="h6" gutterBottom>
+          <div className="space-y-4">
+            <h3 className="text-lg font-medium text-databricks-gray-900 mb-4">
               Configure Endpoints
-            </Typography>
-            <TextField
-              fullWidth
+            </h3>
+            <Input
               label="Embedding Model Endpoint"
               value={embeddingEndpoint}
               onChange={(e) => setEmbeddingEndpoint(e.target.value)}
-              sx={{ mb: 2 }}
               helperText="Databricks Model Serving endpoint for embeddings"
+              placeholder="e.g., databricks-bge-large-en"
+              required
             />
-            <TextField
-              fullWidth
+            <Input
               label="Vector Search Endpoint"
               value={vsEndpoint}
               onChange={(e) => setVsEndpoint(e.target.value)}
               helperText="Databricks Vector Search endpoint name"
+              placeholder="e.g., vs-endpoint-default"
+              required
             />
-          </Box>
+          </div>
         )
+
       default:
         return null
     }
   }
 
   return (
-    <Box>
-      <Typography variant="h4" gutterBottom>
-        Build Retrieval Pipeline
-      </Typography>
+    <div>
+      <div className="mb-6">
+        <h1 className="text-2xl font-semibold text-databricks-gray-900">Build Retrieval Pipeline</h1>
+        <p className="text-sm text-databricks-gray-600 mt-1">
+          Configure and submit build jobs for your retrieval pipeline
+        </p>
+      </div>
 
       {!selectedProjectId && (
-        <Alert severity="warning" sx={{ mb: 2 }}>
-          Please select a project from the sidebar to start building.
-        </Alert>
+        <div className="mb-6 p-4 bg-yellow-50 border border-yellow-200 rounded-md">
+          <p className="text-sm text-yellow-800">
+            Please select a project from the sidebar to start building.
+          </p>
+        </div>
       )}
 
       {selectedProject && (
-        <Typography variant="subtitle1" color="text.secondary" gutterBottom>
-          Project: {selectedProject.project_name}
-        </Typography>
+        <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-md">
+          <p className="text-sm text-blue-900">
+            <span className="font-medium">Current project:</span> {selectedProject.project_name}
+          </p>
+        </div>
       )}
 
-      <Paper sx={{ p: 3, mt: 3 }}>
-        <Stepper activeStep={activeStep} sx={{ mb: 4 }}>
-          {steps.map((label) => (
-            <Step key={label}>
-              <StepLabel>{label}</StepLabel>
-            </Step>
-          ))}
-        </Stepper>
+      <Card>
+        {/* Progress Steps */}
+        <div className="mb-8">
+          <div className="flex items-center justify-between">
+            {steps.map((step, index) => (
+              <div key={step.number} className="flex items-center flex-1">
+                <div className="flex items-center">
+                  <div
+                    className={`flex items-center justify-center w-10 h-10 rounded-full border-2 font-medium text-sm transition-colors ${
+                      index < activeStep
+                        ? 'bg-databricks-blue border-databricks-blue text-white'
+                        : index === activeStep
+                        ? 'border-databricks-blue text-databricks-blue bg-white'
+                        : 'border-databricks-gray-300 text-databricks-gray-500 bg-white'
+                    }`}
+                  >
+                    {index < activeStep ? (
+                      <CheckCircle2 className="w-5 h-5" />
+                    ) : (
+                      step.number
+                    )}
+                  </div>
+                  <div className="ml-3">
+                    <p
+                      className={`text-sm font-medium ${
+                        index <= activeStep
+                          ? 'text-databricks-gray-900'
+                          : 'text-databricks-gray-500'
+                      }`}
+                    >
+                      {step.label}
+                    </p>
+                  </div>
+                </div>
+                {index < steps.length - 1 && (
+                  <div
+                    className={`flex-1 h-0.5 mx-4 ${
+                      index < activeStep ? 'bg-databricks-blue' : 'bg-databricks-gray-300'
+                    }`}
+                  />
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
 
-        <Box sx={{ minHeight: 300, mb: 3 }}>{renderStepContent(activeStep)}</Box>
+        {/* Step Content */}
+        <div className="min-h-[300px] mb-8">{renderStepContent(activeStep)}</div>
 
-        <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
-          <Button disabled={activeStep === 0} onClick={handleBack}>
+        {error && (
+          <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-md">
+            <p className="text-sm text-red-800">{error}</p>
+          </div>
+        )}
+
+        {/* Navigation Buttons */}
+        <div className="flex justify-between items-center pt-6 border-t border-databricks-gray-200">
+          <Button
+            variant="outline"
+            onClick={handleBack}
+            disabled={activeStep === 0}
+            icon={<ChevronLeft className="w-4 h-4" />}
+          >
             Back
           </Button>
-          <Box>
+
+          <div className="flex gap-3">
             {activeStep === steps.length - 1 ? (
-              <Button 
-                variant="contained" 
-                onClick={handleSubmit} 
-                startIcon={<PlayIcon />}
+              <Button
+                variant="primary"
+                onClick={handleSubmit}
+                isLoading={isSubmitting}
                 disabled={!selectedProjectId || isSubmitting}
+                icon={<PlayCircle className="w-4 h-4" />}
               >
-                {isSubmitting ? 'Submitting...' : 'Submit Build Job'}
+                Submit Build Job
               </Button>
             ) : (
-              <Button variant="contained" onClick={handleNext}>
+              <Button
+                variant="primary"
+                onClick={handleNext}
+                icon={<ChevronRight className="w-4 h-4" />}
+              >
                 Next
               </Button>
             )}
-          </Box>
-        </Box>
-      </Paper>
-    </Box>
+          </div>
+        </div>
+      </Card>
+    </div>
   )
 }
