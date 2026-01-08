@@ -296,9 +296,7 @@ export default function Leaderboard() {
               <TableRow>
                 <TableHead>Rank</TableHead>
                 <TableHead>Strategy</TableHead>
-                <TableHead>Recall@5</TableHead>
                 <TableHead>Recall@10</TableHead>
-                <TableHead>NDCG@5</TableHead>
                 <TableHead>NDCG@10</TableHead>
                 <TableHead>Latency (ms)</TableHead>
                 <TableHead>Queries</TableHead>
