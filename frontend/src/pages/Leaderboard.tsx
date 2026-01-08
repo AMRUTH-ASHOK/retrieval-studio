@@ -119,17 +119,13 @@ export default function Leaderboard() {
     // Calculate average of all metrics for ranking
     return leaderboardData.reduce((best, current) => {
       const currentAvg =
-        ((current.avg_recall_at_5 || 0) +
-          (current.avg_recall_at_10 || 0) +
-          (current.avg_ndcg_at_5 || 0) +
+        ((current.avg_recall_at_10 || 0) +
           (current.avg_ndcg_at_10 || 0)) /
-        4
+        2
       const bestAvg =
-        ((best.avg_recall_at_5 || 0) +
-          (best.avg_recall_at_10 || 0) +
-          (best.avg_ndcg_at_5 || 0) +
+        ((best.avg_recall_at_10 || 0) +
           (best.avg_ndcg_at_10 || 0)) /
-        4
+        2
       return currentAvg > bestAvg ? current : best
     })
   }
