@@ -226,6 +226,9 @@ with mlflow.start_run(run_name=f"build_{run_id[:8]}") as parent_run:
                        .mode("overwrite")
                        .partitionBy("run_id")
                        .saveAsTable(chunks_table))
+                
+                # Enable Change Data Feed (required for STANDARD delta-sync indexes)
+                spark.sql(f"ALTER TABLE {chunks_table} SET TBLPROPERTIES (delta.enableChangeDataFeed = true)")
 
                 # choose index source table
                 source_for_index = chunks_table
@@ -244,6 +247,9 @@ with mlflow.start_run(run_name=f"build_{run_id[:8]}") as parent_run:
                            .mode("overwrite")
                            .partitionBy("run_id")
                            .saveAsTable(indexable_table))
+                    
+                    spark.sql(f"ALTER TABLE {indexable_table} SET TBLPROPERTIES (delta.enableChangeDataFeed = true)")
+
 
                     source_for_index = indexable_table
 

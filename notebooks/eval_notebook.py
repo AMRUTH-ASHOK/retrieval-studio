@@ -6,12 +6,13 @@
 dbutils.widgets.text("build_run_id", "")
 dbutils.widgets.text("project_name", "default")
 dbutils.widgets.text("queries_table", "")
+dbutils.widgets.text("dataset_type", "delta_table")
 dbutils.widgets.text("top_k", "10")
 dbutils.widgets.text("catalog", "")
 dbutils.widgets.text("schema", "")
 
 # COMMAND ----------
-# MAGIC %pip install databricks-vectorsearch mlflow --quiet
+# MAGIC %pip install databricks-vectorsearch mlflow requests --quiet
 # COMMAND ----------
 dbutils.library.restartPython()
 
@@ -69,6 +70,7 @@ from utils.vs_utils import query_index
 build_run_id = dbutils.widgets.get("build_run_id")
 project_name = dbutils.widgets.get("project_name") or "default"
 queries_table = dbutils.widgets.get("queries_table")
+dataset_type = dbutils.widgets.get("dataset_type") or "delta_table"
 top_k = int(dbutils.widgets.get("top_k") or "10")
 
 if not build_run_id:
@@ -77,10 +79,24 @@ if not queries_table:
     raise ValueError("Missing queries_table")
 
 # COMMAND ----------
-# Load queries once
-qdf = spark.table(queries_table)
+# Load queries based on dataset type
+if dataset_type == "delta_table":
+    qdf = spark.table(queries_table)
+elif dataset_type == "csv":
+    # Load CSV file
+    qdf = spark.read.option("header", "true").option("inferSchema", "true").csv(queries_table)
+elif dataset_type == "excel":
+    # Load Excel file (requires additional library, fallback to CSV if not available)
+    try:
+        qdf = spark.read.format("com.crealytics.spark.excel").option("header", "true").load(queries_table)
+    except:
+        # Fallback: try to read as CSV if Excel library not available
+        raise ValueError("Excel file support requires spark-excel library. Please install it or convert to CSV.")
+else:
+    raise ValueError(f"Unsupported dataset_type: {dataset_type}. Supported types: delta_table, csv, excel")
+
 if "query_text" not in qdf.columns:
-    raise ValueError("queries_table must include query_text")
+    raise ValueError("Dataset must include query_text column")
 
 cols = ["query_text"]
 if "expected_chunks" in qdf.columns:
@@ -114,6 +130,7 @@ CREATE TABLE IF NOT EXISTS {eval_results_table} (
   project STRING,
   strategy STRING,
   query_text STRING,
+  query_type STRING,
   metrics STRING,
   created_at TIMESTAMP
 )
@@ -174,14 +191,14 @@ with mlflow.start_run(run_name=f"eval_{build_run_id[:8]}") as eval_parent:
                 latency_ms = (time.time() - t0) * 1000.0
 
                 if expected_ids:
-                    metrics = evaluator.compute_labeled_metrics(qtext, retrieved, expected_ids, k_values=[10])
+                    metrics = evaluator.compute_labeled_metrics(qtext, retrieved, expected_ids, k_values=[top_k])
                 else:
-                    metrics = evaluator.compute_judge_metrics(qtext, retrieved, k_values=[10])
+                    metrics = evaluator.compute_judge_metrics(qtext, retrieved, k_values=[top_k])
 
                 metrics["retrieval_latency_ms"] = latency_ms
 
-                recalls.append(float(metrics.get("recall_at_10", 0.0)))
-                ndcgs.append(float(metrics.get("ndcg_at_10", 0.0)))
+                recalls.append(float(metrics.get(f"recall_at_{top_k}", 0.0)))
+                ndcgs.append(float(metrics.get(f"ndcg_at_{top_k}", 0.0)))
                 latencies.append(float(metrics.get("retrieval_latency_ms", 0.0)))
 
                 all_rows.append({
@@ -192,11 +209,12 @@ with mlflow.start_run(run_name=f"eval_{build_run_id[:8]}") as eval_parent:
                     "project": project_name,
                     "strategy": strategy_name,
                     "query_text": qtext,
+                    "query_type": "ANN",
                     "metrics": json.dumps(metrics),
                 })
 
-            mlflow.log_metric("recall_at_10", sum(recalls)/len(recalls) if recalls else 0.0)
-            mlflow.log_metric("ndcg_at_10", sum(ndcgs)/len(ndcgs) if ndcgs else 0.0)
+            mlflow.log_metric(f"recall_at_{top_k}", sum(recalls)/len(recalls) if recalls else 0.0)
+            mlflow.log_metric(f"ndcg_at_{top_k}", sum(ndcgs)/len(ndcgs) if ndcgs else 0.0)
             mlflow.log_metric("avg_latency_ms", sum(latencies)/len(latencies) if latencies else 0.0)
 
 if all_rows:

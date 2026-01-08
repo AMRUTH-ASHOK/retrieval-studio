@@ -16,4 +16,15 @@ export const buildsApi = {
     const response = await api.get(`/builds/project/${projectId}`)
     return response.data
   },
+
+  getStatus: async (runId: string): Promise<{
+    run_id: string
+    state: string
+    job_url: string | null
+    status: any
+    start_time: number | null
+  }> => {
+    const response = await api.get(`/builds/${runId}/status`)
+    return response.data
+  },
 }

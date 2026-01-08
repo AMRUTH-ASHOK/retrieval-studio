@@ -38,6 +38,7 @@ class BuildJobResponse(BaseModel):
     project_id: str
     state: str
     job_id: Optional[str] = None
+    job_url: Optional[str] = None
     config: Dict[str, Any]
     created_at: datetime
     updated_at: datetime
@@ -46,6 +47,8 @@ class BuildJobResponse(BaseModel):
 class EvaluationCreate(BaseModel):
     run_id: str
     queries_table: str
+    dataset_type: Optional[str] = "delta_table"
+    top_k: Optional[int] = 10
 
 
 class EvaluationResponse(BaseModel):
@@ -53,6 +56,7 @@ class EvaluationResponse(BaseModel):
     run_id: str
     state: str
     job_id: Optional[str] = None
+    job_url: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

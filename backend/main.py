@@ -154,20 +154,44 @@ async def create_evaluation_no_trailing_slash(
 ):
     """Submit evaluation job handler for /api/evaluations (without trailing slash)"""
     try:
-        from utils.jobs import submit_eval_job, get_job_run_status
+        from utils.jobs import submit_eval_job, get_job_run_status, get_job_url
+        from utils.state import get_run, update_run_state
         import uuid
+        
+        # Get build run to extract project_name
+        build_run = get_run(sql_connector, settings.CATALOG, settings.SCHEMA, eval_request.run_id)
+        if not build_run:
+            raise HTTPException(status_code=404, detail="Build run not found")
+        
+        project_name = build_run.get("project_name", "default")
+        top_k = eval_request.top_k or 10
+        dataset_type = eval_request.dataset_type or "delta_table"
         
         # Submit the evaluation job
         job_run_id = submit_eval_job(
             w=w,
+            notebook_path=settings.EVAL_NOTEBOOK_PATH,
+            build_run_id=eval_request.run_id,
+            queries_table=eval_request.queries_table,
+            project_name=project_name,
+            catalog=settings.CATALOG,
+            schema=settings.SCHEMA,
+            dataset_type=dataset_type,
+            top_k=top_k
+        )
+        
+        # Get job run details to return timestamps
+        job_run_status = get_job_run_status(w, job_run_id)
+        job_url = get_job_url(w, job_run_id)
+        
+        # Update build run with eval_job_run_id
+        update_run_state(
+            sql_connector=sql_connector,
             catalog=settings.CATALOG,
             schema=settings.SCHEMA,
             run_id=eval_request.run_id,
-            queries_table=eval_request.queries_table,
-            notebook_path=settings.EVAL_NOTEBOOK_PATH
+            eval_job_run_id=job_run_id
         )
-        
-        job_run_status = get_job_run_status(w, job_run_id)
         
         # Return evaluation details
         return {
@@ -175,9 +199,12 @@ async def create_evaluation_no_trailing_slash(
             "run_id": eval_request.run_id,
             "state": "RUNNING",
             "job_id": str(job_run_id),
+            "job_url": job_url,
             "created_at": job_run_status.get("start_time"),
             "updated_at": job_run_status.get("start_time")
         }
+    except HTTPException:
+        raise
     except Exception as e:
          import traceback
          error_detail = f"Failed to submit evaluation job: {str(e)}\n{traceback.format_exc()}"

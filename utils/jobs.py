@@ -80,10 +80,13 @@ def submit_build_job(
 def submit_eval_job(
     w: WorkspaceClient,
     notebook_path: str,
-    run_id: str,
+    build_run_id: str,
     queries_table: str,
+    project_name: str,
     catalog: str,
     schema: str,
+    dataset_type: str = "delta_table",
+    top_k: int = 10,
     timeout_minutes: int = 30,
     compute_size: str = None
 ) -> int:
@@ -96,10 +99,12 @@ def submit_eval_job(
     Args:
         w: WorkspaceClient instance
         notebook_path: Path to eval notebook
-        run_id: Run identifier
+        build_run_id: Build run identifier
         queries_table: Full table name (catalog.schema.table) containing evaluation queries
+        project_name: Project name
         catalog: Catalog name
         schema: Schema name
+        top_k: Number of top results to retrieve (default 10)
         timeout_minutes: Job timeout in minutes
         compute_size: Not used for serverless (parameter kept for compatibility)
     
@@ -111,8 +116,11 @@ def submit_eval_job(
         
         # Prepare job parameters
         base_parameters = {
-            "run_id": run_id,
+            "build_run_id": build_run_id,
+            "project_name": project_name,
             "queries_table": queries_table,
+            "dataset_type": dataset_type,
+            "top_k": str(top_k),
             "catalog": catalog,
             "schema": schema,
         }
@@ -133,7 +141,7 @@ def submit_eval_job(
         # Submit job run with serverless compute
         # When no cluster is specified, Databricks uses serverless compute automatically
         run = w.jobs.submit(
-            run_name=f"RetrievalStudio-Eval-{run_id[:8]}",
+            run_name=f"RetrievalStudio-Eval-{build_run_id[:8]}",
             tasks=[task]
         )
         
@@ -160,8 +168,26 @@ def get_job_run_status(w: WorkspaceClient, job_run_id: int) -> dict:
     try:
         run = w.jobs.get_run(run_id=job_run_id)
         
+        # Get task run ID from the first task if available
+        task_run_id = None
+        if hasattr(run, 'tasks') and run.tasks and len(run.tasks) > 0:
+            task = run.tasks[0]
+            if hasattr(task, 'run_id'):
+                task_run_id = task.run_id
+        
+        # Get run as user/service principal
+        run_as = None
+        if hasattr(run, 'run_as'):
+            if hasattr(run.run_as, 'service_principal_name'):
+                run_as = run.run_as.service_principal_name
+            elif hasattr(run.run_as, 'user_name'):
+                run_as = run.run_as.user_name
+        
         return {
             "run_id": run.run_id,
+            "job_id": run.job_id if hasattr(run, 'job_id') and run.job_id else None,
+            "task_run_id": task_run_id,
+            "run_as": run_as,
             "state": run.state.life_cycle_state.value if run.state else None,
             "result_state": run.state.result_state.value if run.state and run.state.result_state else None,
             "start_time": run.start_time,
@@ -173,4 +199,44 @@ def get_job_run_status(w: WorkspaceClient, job_run_id: int) -> dict:
     except Exception as e:
         raise JobSubmissionError(
             handle_error(e, f"Failed to get job run status for {job_run_id}", show_traceback=False)
+        ) from e
+
+
+def get_job_url(w: WorkspaceClient, job_run_id: int) -> str:
+    """Construct Databricks job run URL"""
+    try:
+        run = w.jobs.get_run(run_id=job_run_id)
+        job_id = run.job_id if hasattr(run, 'job_id') and run.job_id else None
+        
+        if not job_id:
+            # For one-time runs submitted via jobs.submit(), the job_id might be None
+            # In this case, we can't construct a proper URL
+            return None
+        
+        # Get workspace URL from config
+        from databricks.sdk.core import Config
+        cfg = Config()
+        host = cfg.host
+        
+        # Try to get workspace ID - it's often in the host URL or can be extracted
+        # Format: https://<host>/jobs/<job_id>/runs/<run_id>?o=<workspace_id>
+        workspace_id = None
+        
+        # Try to get workspace ID from workspace client
+        try:
+            # The workspace ID might be available through the current user or workspace info
+            # For now, we'll construct URL without it if not available
+            # The URL will still work without the ?o parameter
+            pass
+        except:
+            pass
+        
+        # Construct URL - workspace_id is optional
+        if workspace_id:
+            return f"{host}/jobs/{job_id}/runs/{job_run_id}?o={workspace_id}"
+        else:
+            return f"{host}/jobs/{job_id}/runs/{job_run_id}"
+    except Exception as e:
+        raise JobSubmissionError(
+            handle_error(e, f"Failed to get job URL for {job_run_id}", show_traceback=False)
         ) from e

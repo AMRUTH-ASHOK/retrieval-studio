@@ -12,7 +12,7 @@ from backend.config import settings
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from utils.jobs import submit_build_job
+from utils.jobs import submit_build_job, get_job_run_status, get_job_url
 from utils.state import get_run, get_project_runs
 
 router = APIRouter()
@@ -67,9 +67,25 @@ async def create_build_job(
             build_job_run_id=job_run_id
         )
         
-        # Get the created run
+        # Get job URL
+        job_url = get_job_url(w, job_run_id)
+        
+        # Get the created run and transform to BuildJobResponse format
         run = get_run(sql_connector, settings.CATALOG, settings.SCHEMA, run_id)
-        return run
+        if not run:
+            raise HTTPException(status_code=500, detail="Failed to retrieve created run")
+        
+        # Transform to BuildJobResponse format
+        return {
+            "run_id": run.get("run_id"),
+            "project_id": run.get("project_id"),
+            "state": run.get("state", "RUNNING"),
+            "job_id": str(run.get("build_job_run_id")) if run.get("build_job_run_id") else None,
+            "job_url": job_url,
+            "config": run.get("config", {}),
+            "created_at": run.get("created_at"),
+            "updated_at": run.get("updated_at"),
+        }
         
     except HTTPException:
         raise
@@ -78,13 +94,33 @@ async def create_build_job(
 
 
 @router.get("/{run_id}", response_model=BuildJobResponse)
-async def get_build_job(run_id: str, sql_connector=Depends(get_sql_connector)):
+async def get_build_job(run_id: str, sql_connector=Depends(get_sql_connector), w=Depends(get_workspace_client)):
     """Get build job by run ID"""
     try:
         run = get_run(sql_connector, settings.CATALOG, settings.SCHEMA, run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Build job not found")
-        return run
+        
+        # Generate job URL if build_job_run_id exists
+        job_url = None
+        build_job_run_id = run.get("build_job_run_id")
+        if build_job_run_id:
+            try:
+                job_url = get_job_url(w, build_job_run_id)
+            except Exception:
+                pass  # If URL generation fails, continue without it
+        
+        # Transform to BuildJobResponse format
+        return {
+            "run_id": run.get("run_id"),
+            "project_id": run.get("project_id"),
+            "state": run.get("state", "UNKNOWN"),
+            "job_id": str(build_job_run_id) if build_job_run_id else None,
+            "job_url": job_url,
+            "config": run.get("config", {}),
+            "created_at": run.get("created_at"),
+            "updated_at": run.get("updated_at"),
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -92,10 +128,108 @@ async def get_build_job(run_id: str, sql_connector=Depends(get_sql_connector)):
 
 
 @router.get("/project/{project_id}", response_model=List[BuildJobResponse])
-async def get_project_builds(project_id: str, sql_connector=Depends(get_sql_connector)):
+async def get_project_builds(project_id: str, sql_connector=Depends(get_sql_connector), w=Depends(get_workspace_client)):
     """Get all build jobs for a project"""
     try:
         runs = get_project_runs(sql_connector, settings.CATALOG, settings.SCHEMA, project_id)
-        return runs
+        
+        # Transform raw SQL results to BuildJobResponse format
+        transformed_runs = []
+        for row in runs:
+            build_job_run_id = row.get("build_job_run_id")
+            job_url = None
+            
+            # Generate job URL if build_job_run_id exists (only for recent/running builds to avoid performance issues)
+            # Skip URL generation for old completed builds
+            state = row.get("state", "UNKNOWN")
+            if build_job_run_id and state in ["RUNNING", "PENDING", "SUCCESS"]:
+                try:
+                    job_url = get_job_url(w, build_job_run_id)
+                except Exception:
+                    # If URL generation fails, continue without it
+                    pass
+            
+            # Parse config JSON string to dict
+            config_str = row.get("config", "{}")
+            try:
+                if isinstance(config_str, str):
+                    config_dict = json.loads(config_str) if config_str else {}
+                else:
+                    config_dict = config_str or {}
+            except (json.JSONDecodeError, TypeError):
+                config_dict = {}
+            
+            transformed_runs.append({
+                "run_id": row.get("run_id"),
+                "project_id": row.get("project_id"),
+                "state": state,
+                "job_id": str(build_job_run_id) if build_job_run_id else None,
+                "job_url": job_url,
+                "config": config_dict,
+                "created_at": row.get("created_at"),
+                "updated_at": row.get("updated_at"),
+            })
+        
+        return transformed_runs
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{run_id}/status")
+async def get_build_job_status(run_id: str, w=Depends(get_workspace_client), sql_connector=Depends(get_sql_connector)):
+    """Get build job status with job URL"""
+    try:
+        run = get_run(sql_connector, settings.CATALOG, settings.SCHEMA, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Build job not found")
+        
+        job_run_id = run.get("build_job_run_id")
+        if not job_run_id:
+            return {
+                "run_id": run_id,
+                "state": run.get("state", "UNKNOWN"),
+                "job_url": None,
+                "status": None,
+                "start_time": None,
+            }
+        
+        # Get job status from Databricks
+        job_status = get_job_run_status(w, job_run_id)
+        job_url = get_job_url(w, job_run_id)
+        
+        # Update state in database if it changed
+        current_state = run.get("state")
+        new_state = job_status.get("result_state") or job_status.get("state")
+        
+        # Map Databricks states to our states
+        state_mapping = {
+            "SUCCESS": "SUCCESS",
+            "FAILED": "FAILED",
+            "CANCELED": "FAILED",
+            "TIMEDOUT": "FAILED",
+            "RUNNING": "RUNNING",
+            "PENDING": "PENDING",
+        }
+        mapped_state = state_mapping.get(new_state, current_state)
+        
+        if mapped_state != current_state:
+            from utils.state import update_run_state
+            update_run_state(
+                sql_connector=sql_connector,
+                catalog=settings.CATALOG,
+                schema=settings.SCHEMA,
+                run_id=run_id,
+                state=mapped_state
+            )
+        
+        return {
+            "run_id": run_id,
+            "state": mapped_state,
+            "job_url": job_url,
+            "status": job_status,
+            "start_time": job_status.get("start_time"),
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

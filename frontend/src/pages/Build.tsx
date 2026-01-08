@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react'
-import { PlayCircle, ChevronRight, ChevronLeft, CheckCircle2 } from 'lucide-react'
+import { useState, useEffect, useRef } from 'react'
+import { PlayCircle, ChevronRight, ChevronLeft, CheckCircle2, ExternalLink, Clock, Copy, CheckCircle } from 'lucide-react'
 import { buildsApi } from '../services/builds'
 import { metadataApi } from '../services/metadata'
 import { DataType, Strategy } from '../types'
@@ -8,8 +8,11 @@ import { Button } from '../components/ui/Button'
 import { Input } from '../components/ui/Input'
 import { Select } from '../components/ui/Select'
 import { Card, CardContent } from '../components/ui/Card'
+import { Badge } from '../components/ui/Badge'
+import { useNavigate } from 'react-router-dom'
 
 export default function Build() {
+  const navigate = useNavigate()
   const { selectedProject, selectedProjectId } = useProject()
   const [activeStep, setActiveStep] = useState(0)
   const [dataTypes, setDataTypes] = useState<DataType[]>([])
@@ -21,6 +24,15 @@ export default function Build() {
   const [dataConfig, setDataConfig] = useState<Record<string, any>>({})
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState('')
+  const [submittedRunId, setSubmittedRunId] = useState<string | null>(null)
+  const [jobStatus, setJobStatus] = useState<{
+    state: string
+    job_url: string | null
+    start_time: number | null
+    status: any
+    run_id: string
+  } | null>(null)
+  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null)
 
   const steps = [
     { label: 'Select Data Type', number: 1 },
@@ -31,7 +43,100 @@ export default function Build() {
 
   useEffect(() => {
     loadMetadata()
+    
+    // Cleanup polling on unmount
+    return () => {
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current)
+      }
+    }
   }, [])
+
+  useEffect(() => {
+    // Start polling when a run is submitted
+    if (submittedRunId) {
+      pollJobStatus()
+      pollingIntervalRef.current = setInterval(pollJobStatus, 5000) // Poll every 5 seconds
+    }
+    
+    return () => {
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current)
+        pollingIntervalRef.current = null
+      }
+    }
+  }, [submittedRunId])
+
+  const pollJobStatus = async () => {
+    if (!submittedRunId) return
+    
+    try {
+      const status = await buildsApi.getStatus(submittedRunId)
+      setJobStatus({
+        state: status.state,
+        job_url: status.job_url,
+        start_time: status.start_time,
+        status: status.status,
+        run_id: status.run_id,
+      })
+      
+      // If job succeeded, stop polling and navigate to evaluate page
+      if (status.state === 'SUCCESS') {
+        if (pollingIntervalRef.current) {
+          clearInterval(pollingIntervalRef.current)
+          pollingIntervalRef.current = null
+        }
+        // Navigate to evaluate page after a short delay
+        setTimeout(() => {
+          navigate('/evaluate')
+        }, 2000)
+      } else if (status.state === 'FAILED') {
+        // Stop polling on failure
+        if (pollingIntervalRef.current) {
+          clearInterval(pollingIntervalRef.current)
+          pollingIntervalRef.current = null
+        }
+      }
+    } catch (error) {
+      console.error('Failed to poll job status:', error)
+    }
+  }
+
+  const formatTimeSince = (startTime: number | null) => {
+    if (!startTime) return 'N/A'
+    const seconds = Math.floor((Date.now() - startTime) / 1000)
+    if (seconds < 60) return `${seconds}s ago`
+    const minutes = Math.floor(seconds / 60)
+    if (minutes < 60) return `${minutes}m ago`
+    const hours = Math.floor(minutes / 60)
+    return `${hours}h ${minutes % 60}m ago`
+  }
+
+  const formatDuration = (startTime: number | null, endTime: number | null) => {
+    if (!startTime) return 'N/A'
+    const end = endTime || Date.now()
+    const seconds = Math.floor((end - startTime) / 1000)
+    if (seconds < 60) return `${seconds}s`
+    const minutes = Math.floor(seconds / 60)
+    if (minutes < 60) return `${minutes}m ${seconds % 60}s`
+    const hours = Math.floor(minutes / 60)
+    return `${hours}h ${minutes % 60}m ${seconds % 60}s`
+  }
+
+  const formatDateTime = (timestamp: number | null) => {
+    if (!timestamp) return 'N/A'
+    return new Date(timestamp).toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+  }
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text)
+  }
 
   const loadMetadata = async () => {
     try {
@@ -85,24 +190,44 @@ export default function Build() {
         create_index: true,
       }
 
-      await buildsApi.create({
+      const result = await buildsApi.create({
         project_id: selectedProjectId,
         config,
       })
 
-      // Reset form
+      // Store run ID and initial status
+      setSubmittedRunId(result.run_id)
+      // Fetch initial status with full details
+      try {
+        const status = await buildsApi.getStatus(result.run_id)
+        setJobStatus({
+          state: status.state,
+          job_url: status.job_url,
+          start_time: status.start_time,
+          status: status.status,
+          run_id: status.run_id,
+        })
+      } catch (error) {
+        // Fallback to basic info if status fetch fails
+        setJobStatus({
+          state: result.state,
+          job_url: result.job_url || null,
+          start_time: new Date(result.created_at).getTime(),
+          status: null,
+          run_id: result.run_id,
+        })
+      }
+
+      // Reset form (but keep showing status)
       setActiveStep(0)
       setSelectedDataType('')
       setSelectedStrategies([])
       setDataConfig({})
       setEmbeddingEndpoint('')
       setVsEndpoint('')
-      
-      alert('Build job submitted successfully!')
     } catch (error) {
       console.error('Failed to submit build job:', error)
       setError('Failed to submit build job')
-    } finally {
       setIsSubmitting(false)
     }
   }
@@ -397,6 +522,164 @@ export default function Build() {
           </div>
         </div>
       </Card>
+
+      {/* Job Status Block - Below the form */}
+      {jobStatus && submittedRunId && (
+        <Card className="mt-6">
+          <CardContent className="p-6">
+            <div className="flex items-start justify-between mb-6">
+              <h2 className="text-lg font-semibold text-databricks-gray-900">
+                Build Job Status
+              </h2>
+              <Badge
+                variant={
+                  jobStatus.state === 'SUCCESS'
+                    ? 'success'
+                    : jobStatus.state === 'FAILED'
+                    ? 'error'
+                    : jobStatus.state === 'RUNNING'
+                    ? 'info'
+                    : 'warning'
+                }
+              >
+                {jobStatus.state === 'SUCCESS' && <CheckCircle className="w-3 h-3 mr-1" />}
+                {jobStatus.state}
+              </Badge>
+            </div>
+
+            {/* Job Details Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+              <div className="space-y-3">
+                <div>
+                  <label className="text-xs font-medium text-databricks-gray-500 uppercase">Job ID</label>
+                  <div className="flex items-center gap-2 mt-1">
+                    <span className="text-sm font-mono text-databricks-gray-900">
+                      {jobStatus.status?.job_id || 'N/A'}
+                    </span>
+                    {jobStatus.status?.job_id && (
+                      <button
+                        onClick={() => copyToClipboard(String(jobStatus.status.job_id))}
+                        className="text-databricks-gray-400 hover:text-databricks-gray-600"
+                        title="Copy Job ID"
+                      >
+                        <Copy className="w-3 h-3" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-xs font-medium text-databricks-gray-500 uppercase">Job run ID</label>
+                  <div className="flex items-center gap-2 mt-1">
+                    <span className="text-sm font-mono text-databricks-gray-900">
+                      {jobStatus.status?.run_id || 'N/A'}
+                    </span>
+                    {jobStatus.status?.run_id && (
+                      <button
+                        onClick={() => copyToClipboard(String(jobStatus.status.run_id))}
+                        className="text-databricks-gray-400 hover:text-databricks-gray-600"
+                        title="Copy Job Run ID"
+                      >
+                        <Copy className="w-3 h-3" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-xs font-medium text-databricks-gray-500 uppercase">Task run ID</label>
+                  <div className="flex items-center gap-2 mt-1">
+                    <span className="text-sm font-mono text-databricks-gray-900">
+                      {jobStatus.status?.task_run_id || 'N/A'}
+                    </span>
+                    {jobStatus.status?.task_run_id && (
+                      <button
+                        onClick={() => copyToClipboard(String(jobStatus.status.task_run_id))}
+                        className="text-databricks-gray-400 hover:text-databricks-gray-600"
+                        title="Copy Task Run ID"
+                      >
+                        <Copy className="w-3 h-3" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-xs font-medium text-databricks-gray-500 uppercase">Run as</label>
+                  <p className="text-sm text-databricks-gray-900 mt-1">
+                    {jobStatus.status?.run_as || 'N/A'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <div>
+                  <label className="text-xs font-medium text-databricks-gray-500 uppercase">Started</label>
+                  <p className="text-sm text-databricks-gray-900 mt-1">
+                    {formatDateTime(jobStatus.start_time)}
+                  </p>
+                </div>
+
+                <div>
+                  <label className="text-xs font-medium text-databricks-gray-500 uppercase">Ended</label>
+                  <p className="text-sm text-databricks-gray-900 mt-1">
+                    {formatDateTime(jobStatus.status?.end_time)}
+                  </p>
+                </div>
+
+                <div>
+                  <label className="text-xs font-medium text-databricks-gray-500 uppercase">Duration</label>
+                  <div className="mt-1">
+                    <p className="text-sm text-databricks-gray-900">
+                      {formatDuration(jobStatus.start_time, jobStatus.status?.end_time)}
+                    </p>
+                    {jobStatus.start_time && (
+                      <div className="w-full bg-databricks-gray-200 rounded-full h-1.5 mt-2">
+                        <div
+                          className={`h-1.5 rounded-full ${
+                            jobStatus.state === 'SUCCESS'
+                              ? 'bg-green-500'
+                              : jobStatus.state === 'FAILED'
+                              ? 'bg-red-500'
+                              : 'bg-databricks-blue'
+                          }`}
+                          style={{
+                            width: jobStatus.status?.end_time
+                              ? '100%'
+                              : `${Math.min(90, (Date.now() - jobStatus.start_time) / 1000 / 60)}%`,
+                          }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {jobStatus.job_url && (
+              <div className="pt-4 border-t border-databricks-gray-200">
+                <a
+                  href={jobStatus.job_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center text-sm text-databricks-blue hover:underline"
+                >
+                  <ExternalLink className="w-4 h-4 mr-1" />
+                  View Job in Databricks
+                </a>
+              </div>
+            )}
+
+            {jobStatus.state === 'SUCCESS' && (
+              <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded-md">
+                <p className="text-sm text-green-800">
+                  Build job completed successfully! Redirecting to Evaluate page...
+                </p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
     </div>
   )
 }

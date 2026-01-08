@@ -1,12 +1,24 @@
 import api from './api'
+import { Evaluation } from '../types'
 
 export const evaluationsApi = {
-  create: async (data: { run_id: string; queries_table: string; top_k?: number }) => {
+  create: async (data: { run_id: string; queries_table: string; dataset_type?: string; top_k?: number }): Promise<Evaluation> => {
     const response = await api.post('/evaluations', data)
     return response.data
   },
 
-  getResults: async (runId: string) => {
+  getStatus: async (runId: string): Promise<{
+    run_id: string
+    state: string
+    job_url: string | null
+    status: any
+    start_time: number | null
+  }> => {
+    const response = await api.get(`/evaluations/${runId}/status`)
+    return response.data
+  },
+
+  getResults: async (runId: string): Promise<any[]> => {
     const response = await api.get(`/evaluations/${runId}/results`)
     return response.data
   },

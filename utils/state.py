@@ -49,21 +49,21 @@ def initialize_tables(sql_connector: DatabricksSQLConnector, catalog: str, schem
         )
     """)
     
-    # rl_eval_results table
+    # rs_eval_results table (matches eval_notebook.py schema)
     sql_connector.execute_update(f"""
-        CREATE TABLE IF NOT EXISTS {catalog_escaped}.{schema_escaped}.rl_eval_results (
+        CREATE TABLE IF NOT EXISTS {catalog_escaped}.raw.rs_eval_results (
             eval_result_id STRING,
-            run_id STRING,
+            build_run_id STRING,
+            eval_run_id STRING,
+            build_child_run_id STRING,
+            project STRING,
             strategy STRING,
-            mlflow_run_id STRING,
-            query_id STRING,
             query_text STRING,
-            retrieved_chunks STRING,
+            query_type STRING,
             metrics STRING,
-            retrieval_latency_ms DOUBLE,
             created_at TIMESTAMP
         ) USING DELTA
-        PARTITIONED BY (run_id, strategy)
+        PARTITIONED BY (build_run_id, strategy)
         TBLPROPERTIES (
             'delta.autoOptimize.optimizeWrite' = 'true'
         )

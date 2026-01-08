@@ -20,6 +20,7 @@ export interface BuildJob {
   project_id: string
   state: string
   job_id?: string
+  job_url?: string | null
   config: Record<string, any>
   created_at: string
   updated_at: string
@@ -30,6 +31,7 @@ export interface Evaluation {
   run_id: string
   state: string
   job_id?: string
+  job_url?: string | null
   created_at: string
   updated_at: string
 }
