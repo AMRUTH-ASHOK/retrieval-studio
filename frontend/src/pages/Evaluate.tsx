@@ -15,6 +15,8 @@ export default function Evaluate() {
   const [builds, setBuilds] = useState<BuildJob[]>([])
   const [selectedRun, setSelectedRun] = useState('')
   const [queriesTable, setQueriesTable] = useState('')
+  const [topK, setTopK] = useState('10')
+  const [hasGroundTruth, setHasGroundTruth] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
