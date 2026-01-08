@@ -49,11 +49,51 @@ export default function Leaderboard() {
     setIsLoading(true)
     setError('')
     try {
-      const data = await leaderboardApi.get(selectedRun)
-      setLeaderboardData(data)
+      // Fetch evaluation results for this build run
+      const data = await evaluationsApi.getResults(selectedRun)
+      
+      // Aggregate by strategy
+      const strategyMap: Record<string, any> = {}
+      
+      data.forEach((result: any) => {
+        const strategy = result.strategy
+        if (!strategyMap[strategy]) {
+          strategyMap[strategy] = {
+            strategy,
+            recalls: [],
+            ndcgs: [],
+            latencies: [],
+            num_queries: 0
+          }
+        }
+        
+        // Parse metrics
+        const metrics = typeof result.metrics === 'string' 
+          ? JSON.parse(result.metrics) 
+          : result.metrics
+        
+        strategyMap[strategy].recalls.push(metrics.recall_at_10 || 0)
+        strategyMap[strategy].ndcgs.push(metrics.ndcg_at_10 || 0)
+        strategyMap[strategy].latencies.push(metrics.retrieval_latency_ms || 0)
+        strategyMap[strategy].num_queries++
+      })
+      
+      // Calculate averages
+      const leaderboard = Object.values(strategyMap).map((s: any) => ({
+        strategy: s.strategy,
+        avg_recall_at_10: s.recalls.reduce((a: number, b: number) => a + b, 0) / s.recalls.length,
+        avg_ndcg_at_10: s.ndcgs.reduce((a: number, b: number) => a + b, 0) / s.ndcgs.length,
+        avg_latency_ms: s.latencies.reduce((a: number, b: number) => a + b, 0) / s.latencies.length,
+        num_queries: s.num_queries
+      }))
+      
+      // Sort by avg_recall_at_10 descending
+      leaderboard.sort((a, b) => (b.avg_recall_at_10 || 0) - (a.avg_recall_at_10 || 0))
+      
+      setLeaderboardData(leaderboard)
     } catch (error) {
       console.error('Failed to load leaderboard:', error)
-      setError('Failed to load leaderboard data')
+      setError('Failed to load leaderboard data. Make sure evaluation has been run.')
       setLeaderboardData([])
     } finally {
       setIsLoading(false)
