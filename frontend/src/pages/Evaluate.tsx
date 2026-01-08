@@ -133,8 +133,31 @@ export default function Evaluate() {
               onChange={(e) => setQueriesTable(e.target.value)}
               placeholder="e.g., catalog.schema.queries_table"
               required
-              helperText="Fully qualified table name with evaluation queries"
+              helperText="Table must have 'query_text' column. Optional: 'expected_chunks' for labeled evaluation"
             />
+
+            <Input
+              label="Top K Results"
+              type="number"
+              value={topK}
+              onChange={(e) => setTopK(e.target.value)}
+              placeholder="10"
+              required
+              helperText="Number of top results to retrieve for evaluation (default: 10)"
+            />
+
+            <div className="flex items-center space-x-2 p-4 bg-databricks-gray-50 rounded-md border border-databricks-gray-200">
+              <input
+                type="checkbox"
+                id="hasGroundTruth"
+                checked={hasGroundTruth}
+                onChange={(e) => setHasGroundTruth(e.target.checked)}
+                className="h-4 w-4 text-databricks-blue border-databricks-gray-300 rounded focus:ring-databricks-blue"
+              />
+              <label htmlFor="hasGroundTruth" className="text-sm text-databricks-gray-700">
+                My queries table includes ground truth (expected_chunks column)
+              </label>
+            </div>
 
             {error && (
               <div className="p-3 bg-red-50 border border-red-200 rounded-md">
