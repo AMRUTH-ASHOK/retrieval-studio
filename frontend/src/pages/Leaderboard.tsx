@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Trophy, TrendingUp, Clock, Target } from 'lucide-react'
-import { leaderboardApi } from '../services/leaderboard'
+import { evaluationsApi } from '../services/evaluations'
 import { buildsApi } from '../services/builds'
 import { useProject } from '../context/ProjectContext'
 import { Select } from '../components/ui/Select'
