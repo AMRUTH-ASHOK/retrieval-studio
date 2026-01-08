@@ -201,17 +201,17 @@ export default function Leaderboard() {
             <CardHeader>
               <div className="flex items-center justify-between">
                 <CardTitle className="text-sm font-medium text-databricks-gray-600">
-                  Best Recall@5
+                  Best Recall@10
                 </CardTitle>
                 <TrendingUp className="w-5 h-5 text-databricks-success" />
               </div>
             </CardHeader>
             <CardContent>
               <p className="text-2xl font-semibold text-databricks-gray-900">
-                {formatMetric(getBestStrategy('avg_recall_at_5')?.avg_recall_at_5)}
+                {formatMetric(getBestStrategy('avg_recall_at_10')?.avg_recall_at_10)}
               </p>
               <p className="text-xs text-databricks-gray-500 mt-1">
-                {getBestStrategy('avg_recall_at_5')?.strategy}
+                {getBestStrategy('avg_recall_at_10')?.strategy}
               </p>
             </CardContent>
           </Card>
@@ -220,17 +220,17 @@ export default function Leaderboard() {
             <CardHeader>
               <div className="flex items-center justify-between">
                 <CardTitle className="text-sm font-medium text-databricks-gray-600">
-                  Best NDCG@5
+                  Best NDCG@10
                 </CardTitle>
                 <Target className="w-5 h-5 text-databricks-blue" />
               </div>
             </CardHeader>
             <CardContent>
               <p className="text-2xl font-semibold text-databricks-gray-900">
-                {formatMetric(getBestStrategy('avg_ndcg_at_5')?.avg_ndcg_at_5)}
+                {formatMetric(getBestStrategy('avg_ndcg_at_10')?.avg_ndcg_at_10)}
               </p>
               <p className="text-xs text-databricks-gray-500 mt-1">
-                {getBestStrategy('avg_ndcg_at_5')?.strategy}
+                {getBestStrategy('avg_ndcg_at_10')?.strategy}
               </p>
             </CardContent>
           </Card>
