@@ -316,9 +316,7 @@ export default function Leaderboard() {
                       {entry.strategy}
                     </span>
                   </TableCell>
-                  <TableCell>{formatMetric(entry.avg_recall_at_5)}</TableCell>
                   <TableCell>{formatMetric(entry.avg_recall_at_10)}</TableCell>
-                  <TableCell>{formatMetric(entry.avg_ndcg_at_5)}</TableCell>
                   <TableCell>{formatMetric(entry.avg_ndcg_at_10)}</TableCell>
                   <TableCell>{formatMetric(entry.avg_latency_ms, 0)}</TableCell>
                   <TableCell>
