@@ -144,18 +144,65 @@ export default function Build() {
             <h3 className="text-lg font-medium text-databricks-gray-900 mb-4">
               Configure Data Source
             </h3>
-            {selectedDataTypeInfo?.input_schema?.fields?.map((field: any) => (
-              <Input
-                key={field.name}
-                label={field.label}
-                placeholder={field.default || ''}
-                required={field.required}
-                onChange={(e) =>
-                  setDataConfig((prev) => ({ ...prev, [field.name]: e.target.value }))
-                }
-                value={dataConfig[field.name] || ''}
-              />
-            ))}
+            {selectedDataTypeInfo?.input_schema?.fields?.map((field: any) => {
+              if (field.type === 'textarea') {
+                return (
+                  <div key={field.name}>
+                    <label className="block text-sm font-medium text-databricks-gray-700 mb-1">
+                      {field.label}
+                      {field.required && <span className="text-databricks-error ml-1">*</span>}
+                    </label>
+                    <textarea
+                      value={dataConfig[field.name] || ''}
+                      onChange={(e) =>
+                        setDataConfig((prev) => ({ ...prev, [field.name]: e.target.value }))
+                      }
+                      placeholder={field.default || ''}
+                      required={field.required}
+                      rows={6}
+                      className="w-full px-3 py-2 border border-databricks-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-databricks-blue focus:border-databricks-blue"
+                    />
+                  </div>
+                )
+              } else if (field.type === 'bool') {
+                return (
+                  <div key={field.name} className="flex items-center">
+                    <input
+                      type="checkbox"
+                      checked={dataConfig[field.name] || field.default || false}
+                      onChange={(e) =>
+                        setDataConfig((prev) => ({ ...prev, [field.name]: e.target.checked }))
+                      }
+                      className="h-4 w-4 text-databricks-blue border-databricks-gray-300 rounded focus:ring-databricks-blue"
+                    />
+                    <label className="ml-2 text-sm text-databricks-gray-700">
+                      {field.label}
+                    </label>
+                  </div>
+                )
+              } else {
+                return (
+                  <Input
+                    key={field.name}
+                    label={field.label}
+                    placeholder={field.default || ''}
+                    required={field.required}
+                    onChange={(e) =>
+                      setDataConfig((prev) => ({ ...prev, [field.name]: e.target.value }))
+                    }
+                    value={dataConfig[field.name] || ''}
+                  />
+                )
+              }
+            })}
+            {selectedDataTypeInfo && selectedDataTypeInfo.input_schema?.source_type === 'upload' && (
+              <div className="p-4 bg-databricks-gray-50 rounded-md border border-databricks-gray-200">
+                <p className="text-sm text-databricks-gray-600">
+                  <span className="font-medium">Note:</span> File upload is handled through Databricks workspace.
+                  Please upload your files to a UC Volume or use Delta Table as data source.
+                </p>
+              </div>
+            )}
           </div>
         )
 
