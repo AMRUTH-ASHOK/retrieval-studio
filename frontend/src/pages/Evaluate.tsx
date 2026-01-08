@@ -238,12 +238,26 @@ export default function Evaluate() {
           <li className="flex items-start">
             <span className="mr-2">•</span>
             <span>
-              Your queries table must contain columns for questions and ground truth answers
+              <strong>Required:</strong> Your queries table must contain a 'query_text' column
             </span>
           </li>
           <li className="flex items-start">
             <span className="mr-2">•</span>
-            <span>The evaluation will test Recall@K and NDCG@K metrics (K=5, 10)</span>
+            <span>
+              <strong>Labeled Evaluation:</strong> Include 'expected_chunks' column (array of chunk IDs) for ground truth metrics
+            </span>
+          </li>
+          <li className="flex items-start">
+            <span className="mr-2">•</span>
+            <span>
+              <strong>Judge-Based Evaluation:</strong> Without ground truth, evaluation uses LLM judge scoring
+            </span>
+          </li>
+          <li className="flex items-start">
+            <span className="mr-2">•</span>
+            <span>
+              Metrics computed: Recall@{topK || '10'}, NDCG@{topK || '10'}, and retrieval latency
+            </span>
           </li>
           <li className="flex items-start">
             <span className="mr-2">•</span>
