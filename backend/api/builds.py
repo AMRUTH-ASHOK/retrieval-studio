@@ -13,7 +13,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from utils.jobs import submit_build_job, get_job_run_status, get_job_url
-from utils.state import get_run, get_project_runs
+from utils.postgres_state import get_build as get_run, get_builds_by_project as get_project_runs
 
 router = APIRouter()
 
@@ -26,70 +26,115 @@ async def create_build_job(
 ):
     """Submit a build job to Databricks"""
     try:
-        from utils.state import create_run, update_run_state, get_project
-        
+        print(f"[DEBUG] === BUILD JOB SUBMISSION START ===")
+        print(f"[DEBUG] Project ID: {build_request.project_id}")
+
+        from utils.postgres_state import create_build as create_run, update_build_state as update_run_state, get_project
+
         # Get project details
-        project = get_project(sql_connector, settings.CATALOG, settings.SCHEMA, build_request.project_id)
+        print(f"[DEBUG] Step 1: Getting project details...")
+        project = get_project(build_request.project_id)
         if not project:
+            print(f"[DEBUG] ❌ Project not found: {build_request.project_id}")
             raise HTTPException(status_code=404, detail="Project not found")
+        print(f"[DEBUG] ✅ Project found: {project.get('project_name')}")
         
         # Prepare config with catalog and schema
+        print(f"[DEBUG] Step 2: Preparing config...")
         config = build_request.config.model_dump()
         config["catalog"] = settings.CATALOG
         config["schema"] = settings.SCHEMA
         config["project_name"] = project["project_name"]
-        
-        # Create run record first
-        run_id = create_run(
-            sql_connector=sql_connector,
-            catalog=settings.CATALOG,
-            schema=settings.SCHEMA,
-            project_id=build_request.project_id,
-            project_name=project["project_name"],
-            config=config
-        )
+        print(f"[DEBUG] Config prepared: {list(config.keys())}")
+
+        # Create run record first - generate UUID
+        print(f"[DEBUG] Step 3: Creating build record in Postgres...")
+        run_id = str(uuid.uuid4())
+        print(f"[DEBUG] Generated run_id: {run_id}")
+
+        try:
+            created_build = create_run(
+                run_id=run_id,
+                project_id=build_request.project_id,
+                project_name=project["project_name"],
+                config=config
+            )
+            print(f"[DEBUG] ✅ Build record created in Postgres")
+        except Exception as e:
+            print(f"[DEBUG] ❌ Failed to create build record: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
         
         # Submit the build job
-        job_run_id = submit_build_job(
-            w=w,
-            notebook_path=settings.BUILD_NOTEBOOK_PATH,
-            run_id=run_id,
-            config=config
-        )
-        
+        print(f"[DEBUG] Step 4: Submitting build job to Databricks...")
+        try:
+            job_run_id = submit_build_job(
+                w=w,
+                notebook_path=settings.BUILD_NOTEBOOK_PATH,
+                run_id=run_id,
+                config=config
+            )
+            print(f"[DEBUG] ✅ Job submitted. Job run ID: {job_run_id}")
+        except Exception as e:
+            print(f"[DEBUG] ❌ Failed to submit job: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
+
         # Update run with job_run_id
-        update_run_state(
-            sql_connector=sql_connector,
-            catalog=settings.CATALOG,
-            schema=settings.SCHEMA,
-            run_id=run_id,
-            state="RUNNING",
-            build_job_run_id=job_run_id
-        )
-        
+        print(f"[DEBUG] Step 5: Updating build with job_run_id...")
+        try:
+            update_run_state(
+                run_id=run_id,
+                state="RUNNING",
+                job_run_id=job_run_id
+            )
+            print(f"[DEBUG] ✅ Build updated with job_run_id")
+        except Exception as e:
+            print(f"[DEBUG] ❌ Failed to update build state: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
+
         # Get job URL
+        print(f"[DEBUG] Step 6: Getting job URL...")
         job_url = get_job_url(w, job_run_id)
+        print(f"[DEBUG] Job URL: {job_url}")
         
         # Get the created run and transform to BuildJobResponse format
-        run = get_run(sql_connector, settings.CATALOG, settings.SCHEMA, run_id)
+        print(f"[DEBUG] Step 7: Retrieving build record...")
+        run = get_run(run_id)
         if not run:
+            print(f"[DEBUG] ❌ Failed to retrieve build record")
             raise HTTPException(status_code=500, detail="Failed to retrieve created run")
-        
+
+        print(f"[DEBUG] ✅ Build record retrieved")
+
         # Transform to BuildJobResponse format
-        return {
+        response = {
             "run_id": run.get("run_id"),
             "project_id": run.get("project_id"),
             "state": run.get("state", "RUNNING"),
-            "job_id": str(run.get("build_job_run_id")) if run.get("build_job_run_id") else None,
+            "job_id": str(run.get("job_run_id")) if run.get("job_run_id") else None,
             "job_url": job_url,
             "config": run.get("config", {}),
             "created_at": run.get("created_at"),
             "updated_at": run.get("updated_at"),
         }
-        
+
+        print(f"[DEBUG] === BUILD JOB SUBMISSION SUCCESS ===")
+        return response
+
     except HTTPException:
+        print(f"[DEBUG] === BUILD JOB SUBMISSION FAILED (HTTPException) ===")
         raise
     except Exception as e:
+        print(f"[DEBUG] === BUILD JOB SUBMISSION FAILED ===")
+        print(f"[DEBUG] Error type: {type(e).__name__}")
+        print(f"[DEBUG] Error message: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -97,16 +142,16 @@ async def create_build_job(
 async def get_build_job(run_id: str, sql_connector=Depends(get_sql_connector), w=Depends(get_workspace_client)):
     """Get build job by run ID"""
     try:
-        run = get_run(sql_connector, settings.CATALOG, settings.SCHEMA, run_id)
+        run = get_run(run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Build job not found")
         
-        # Generate job URL if build_job_run_id exists
+        # Generate job URL if job_run_id exists
         job_url = None
-        build_job_run_id = run.get("build_job_run_id")
-        if build_job_run_id:
+        job_run_id = run.get("job_run_id")
+        if job_run_id:
             try:
-                job_url = get_job_url(w, build_job_run_id)
+                job_url = get_job_url(w, job_run_id)
             except Exception:
                 pass  # If URL generation fails, continue without it
         
@@ -115,7 +160,7 @@ async def get_build_job(run_id: str, sql_connector=Depends(get_sql_connector), w
             "run_id": run.get("run_id"),
             "project_id": run.get("project_id"),
             "state": run.get("state", "UNKNOWN"),
-            "job_id": str(build_job_run_id) if build_job_run_id else None,
+            "job_id": str(job_run_id) if job_run_id else None,
             "job_url": job_url,
             "config": run.get("config", {}),
             "created_at": run.get("created_at"),
@@ -131,20 +176,20 @@ async def get_build_job(run_id: str, sql_connector=Depends(get_sql_connector), w
 async def get_project_builds(project_id: str, sql_connector=Depends(get_sql_connector), w=Depends(get_workspace_client)):
     """Get all build jobs for a project"""
     try:
-        runs = get_project_runs(sql_connector, settings.CATALOG, settings.SCHEMA, project_id)
+        runs = get_project_runs(project_id)
         
         # Transform raw SQL results to BuildJobResponse format
         transformed_runs = []
         for row in runs:
-            build_job_run_id = row.get("build_job_run_id")
+            job_run_id = row.get("job_run_id")
             job_url = None
             
-            # Generate job URL if build_job_run_id exists (only for recent/running builds to avoid performance issues)
+            # Generate job URL if job_run_id exists (only for recent/running builds to avoid performance issues)
             # Skip URL generation for old completed builds
             state = row.get("state", "UNKNOWN")
-            if build_job_run_id and state in ["RUNNING", "PENDING", "SUCCESS"]:
+            if job_run_id and state in ["RUNNING", "PENDING", "SUCCESS"]:
                 try:
-                    job_url = get_job_url(w, build_job_run_id)
+                    job_url = get_job_url(w, job_run_id)
                 except Exception:
                     # If URL generation fails, continue without it
                     pass
@@ -163,7 +208,7 @@ async def get_project_builds(project_id: str, sql_connector=Depends(get_sql_conn
                 "run_id": row.get("run_id"),
                 "project_id": row.get("project_id"),
                 "state": state,
-                "job_id": str(build_job_run_id) if build_job_run_id else None,
+                "job_id": str(job_run_id) if job_run_id else None,
                 "job_url": job_url,
                 "config": config_dict,
                 "created_at": row.get("created_at"),
@@ -177,13 +222,18 @@ async def get_project_builds(project_id: str, sql_connector=Depends(get_sql_conn
 
 @router.get("/{run_id}/status")
 async def get_build_job_status(run_id: str, w=Depends(get_workspace_client), sql_connector=Depends(get_sql_connector)):
-    """Get build job status with job URL"""
+    """Get build job status with job URL
+
+    IMPORTANT: This endpoint checks ONLY the BUILD job status (job_run_id).
+    Evaluation job status is tracked separately via /api/evaluations/{eval_id}/status
+    """
     try:
-        run = get_run(sql_connector, settings.CATALOG, settings.SCHEMA, run_id)
+        run = get_run(run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Build job not found")
-        
-        job_run_id = run.get("build_job_run_id")
+
+        # ONLY check the BUILD job (job_run_id), NOT the evaluation job (eval_job_run_id)
+        job_run_id = run.get("job_run_id")
         if not job_run_id:
             return {
                 "run_id": run_id,
@@ -192,8 +242,8 @@ async def get_build_job_status(run_id: str, w=Depends(get_workspace_client), sql
                 "status": None,
                 "start_time": None,
             }
-        
-        # Get job status from Databricks
+
+        # Get BUILD job status from Databricks (not evaluation job)
         job_status = get_job_run_status(w, job_run_id)
         job_url = get_job_url(w, job_run_id)
         
@@ -213,11 +263,8 @@ async def get_build_job_status(run_id: str, w=Depends(get_workspace_client), sql
         mapped_state = state_mapping.get(new_state, current_state)
         
         if mapped_state != current_state:
-            from utils.state import update_run_state
+            from utils.postgres_state import update_build_state as update_run_state
             update_run_state(
-                sql_connector=sql_connector,
-                catalog=settings.CATALOG,
-                schema=settings.SCHEMA,
                 run_id=run_id,
                 state=mapped_state
             )

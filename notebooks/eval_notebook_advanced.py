@@ -257,7 +257,9 @@ with mlflow.start_run(run_name=f"eval_{build_run_id[:8]}") as eval_parent:
 
                 for i, qr in enumerate(query_rows):
                     qtext = qr["query_text"]
-                    expected_raw = qr.get("expected_chunks") if "expected_chunks" in qr.asDict() else None
+                    # Convert Spark Row to dict first, then use .get()
+                    qr_dict = qr.asDict()
+                    expected_raw = qr_dict.get("expected_chunks")
 
                     expected_ids = None
                     if expected_raw is not None:

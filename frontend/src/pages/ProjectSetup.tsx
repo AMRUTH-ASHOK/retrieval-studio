@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { Plus } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { Plus, ChevronRight } from 'lucide-react'
 import { projectsApi } from '../services/projects'
 import { useProject } from '../context/ProjectContext'
 import { Button } from '../components/ui/Button'
@@ -9,6 +10,7 @@ import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '.
 import { Card } from '../components/ui/Card'
 
 export default function ProjectSetup() {
+  const navigate = useNavigate()
   const { projects, loadProjects, isLoading, setSelectedProjectId } = useProject()
   const [open, setOpen] = useState(false)
   const [projectName, setProjectName] = useState('')
@@ -24,7 +26,7 @@ export default function ProjectSetup() {
 
     setIsCreating(true)
     setError('')
-    
+
     try {
       const newProject = await projectsApi.create({
         project_name: projectName,
@@ -35,12 +37,19 @@ export default function ProjectSetup() {
       setDescription('')
       await loadProjects()
       setSelectedProjectId(newProject.project_id)
+      // Navigate to project details page
+      navigate(`/projects/${newProject.project_id}`)
     } catch (error) {
       console.error('Failed to create project:', error)
       setError('Failed to create project. Please try again.')
     } finally {
       setIsCreating(false)
     }
+  }
+
+  const handleViewProject = (projectId: string) => {
+    setSelectedProjectId(projectId)
+    navigate(`/projects/${projectId}`)
   }
 
   return (
@@ -97,16 +106,17 @@ export default function ProjectSetup() {
                 <TableHead>Description</TableHead>
                 <TableHead>Created</TableHead>
                 <TableHead>Last Updated</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {projects.map((project) => (
-                <TableRow
-                  key={project.project_id}
-                  onClick={() => setSelectedProjectId(project.project_id)}
-                >
+                <TableRow key={project.project_id}>
                   <TableCell>
-                    <span className="font-medium text-databricks-blue cursor-pointer hover:underline">
+                    <span
+                      className="font-medium text-databricks-blue cursor-pointer hover:underline"
+                      onClick={() => handleViewProject(project.project_id)}
+                    >
                       {project.project_name}
                     </span>
                   </TableCell>
@@ -124,6 +134,15 @@ export default function ProjectSetup() {
                     <span className="text-databricks-gray-600">
                       {new Date(project.updated_at).toLocaleDateString()}
                     </span>
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => handleViewProject(project.project_id)}
+                    >
+                      View Details →
+                    </Button>
                   </TableCell>
                 </TableRow>
               ))}

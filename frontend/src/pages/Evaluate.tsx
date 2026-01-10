@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { PlayCircle, ExternalLink, Clock } from 'lucide-react'
 import { evaluationsApi } from '../services/evaluations'
 import { buildsApi } from '../services/builds'
@@ -13,11 +14,18 @@ import { BuildJob } from '../types'
 type DatasetType = 'delta_table' | 'csv' | 'excel'
 
 export default function Evaluate() {
+  const navigate = useNavigate()
   const { selectedProject, selectedProjectId } = useProject()
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
   const [datasetType, setDatasetType] = useState<DatasetType>('delta_table')
   const [datasetPath, setDatasetPath] = useState('')
   const [topK, setTopK] = useState(10)
+  const [autoGenerateQueries, setAutoGenerateQueries] = useState(false)
+  const [corpusTable, setCorpusTable] = useState('')
+  const [numQueries, setNumQueries] = useState(50)
+  const [queryStyle, setQueryStyle] = useState('keyword')
+  const [compareQueryTypes, setCompareQueryTypes] = useState(false)
+  const [judgeModelEndpoint, setJudgeModelEndpoint] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
@@ -124,8 +132,18 @@ export default function Evaluate() {
   }
 
   const handleSubmit = async () => {
-    if (!selectedRunId || !datasetPath) {
-      setError('Please fill in all required fields')
+    if (!selectedRunId) {
+      setError('Please select a build run')
+      return
+    }
+
+    if (!autoGenerateQueries && !datasetPath) {
+      setError('Please provide a queries dataset or enable auto-generation')
+      return
+    }
+
+    if (autoGenerateQueries && !corpusTable) {
+      setError('Please provide a corpus table for query generation')
       return
     }
 
@@ -133,19 +151,29 @@ export default function Evaluate() {
     setError('')
 
     try {
-      // For delta_table, use the path directly as queries_table
-      // For CSV/Excel, we'd need to upload and create a table first
-      // For now, we'll assume the user provides a delta table path
-      const queriesTable = datasetType === 'delta_table' 
-        ? datasetPath 
-        : datasetPath // TODO: Handle CSV/Excel upload and table creation
-
-      const result = await evaluationsApi.create({
+      const submitData: any = {
         run_id: selectedRunId,
-        queries_table: queriesTable,
-        dataset_type: datasetType,
         top_k: topK,
-      })
+        auto_generate_queries: autoGenerateQueries,
+        compare_query_types: compareQueryTypes,
+      }
+
+      if (autoGenerateQueries) {
+        submitData.corpus_table = corpusTable
+        submitData.num_queries = numQueries
+        submitData.query_style = queryStyle
+      } else {
+        submitData.queries_table = datasetPath
+        submitData.dataset_type = datasetType
+      }
+
+      if (judgeModelEndpoint) {
+        submitData.judge_model_endpoint = judgeModelEndpoint
+      }
+
+      const result = await evaluationsApi.create(submitData)
+
+      console.log('[DEBUG] Evaluation submitted:', result)
 
       // Store run ID and initial status
       setSubmittedRunId(result.run_id)
@@ -155,8 +183,19 @@ export default function Evaluate() {
         start_time: new Date(result.created_at).getTime(),
       })
 
+      console.log('[DEBUG] Status set:', {
+        submittedRunId: result.run_id,
+        jobStatus: {
+          state: result.state,
+          job_url: result.job_url,
+          start_time: new Date(result.created_at).getTime()
+        }
+      })
+
       // Reset form (but keep showing status)
       setDatasetPath('')
+      setCorpusTable('')
+      setIsSubmitting(false)  // ← FIX: Reset submitting state
     } catch (error: any) {
       console.error('Failed to submit evaluation:', error)
       setError(error?.response?.data?.detail || 'Failed to submit evaluation job')
@@ -174,21 +213,36 @@ export default function Evaluate() {
         </p>
       </div>
 
-      {!selectedProjectId && (
-        <div className="mb-6 p-4 bg-yellow-50 border border-yellow-200 rounded-md">
-          <p className="text-sm text-yellow-800">
-            Please select a project from the sidebar to start evaluation.
-          </p>
-        </div>
-      )}
-
-      {selectedProject && (
-        <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-md">
-          <p className="text-sm text-blue-900">
-            <span className="font-medium">Current project:</span> {selectedProject.project_name}
-          </p>
-        </div>
-      )}
+      {!selectedProjectId ? (
+        <Card>
+          <div className="text-center py-12">
+            <div className="w-16 h-16 mx-auto mb-4 bg-yellow-100 rounded-full flex items-center justify-center">
+              <Clock className="w-4 h-4 text-yellow-600" />
+            </div>
+            <h3 className="text-lg font-medium text-databricks-gray-900 mb-2">
+              No Project Selected
+            </h3>
+            <p className="text-sm text-databricks-gray-600 mb-6 max-w-md mx-auto">
+              You need to select a project and complete a build before you can run evaluations.
+              Please go to the Projects page and select a project to continue.
+            </p>
+            <Button
+              variant="primary"
+              onClick={() => navigate('/projects')}
+            >
+              Go to Projects
+            </Button>
+          </div>
+        </Card>
+      ) : (
+        <>
+          {selectedProject && (
+            <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-md">
+              <p className="text-sm text-blue-900">
+                <span className="font-medium">Current project:</span> {selectedProject.project_name}
+              </p>
+            </div>
+          )}
 
       {jobStatus && submittedRunId && (
         <Card className="mb-6">
@@ -272,55 +326,161 @@ export default function Evaluate() {
             </div>
           )}
 
-          <Select
-              label="Dataset Type"
-              value={datasetType}
-              onChange={(e) => {
-                setDatasetType(e.target.value as DatasetType)
-                setDatasetPath('')
-              }}
-              options={[
-                { value: 'delta_table', label: 'Delta Table' },
-                { value: 'csv', label: 'CSV File' },
-                { value: 'excel', label: 'Excel File' },
-              ]}
-              required
-              helperText="Select the type of golden dataset"
-            />
+          {/* Option 1: Upload Golden Dataset */}
+          <div className="border border-gray-200 rounded-lg p-4">
+            <h3 className="text-md font-semibold text-databricks-gray-900 mb-3">
+              Option 1: Upload Golden Dataset
+            </h3>
+            <p className="text-sm text-databricks-gray-600 mb-4">
+              Use a pre-existing dataset with query_text and optional expected_chunks columns
+            </p>
+
+            <div className="space-y-4">
+              <Select
+                label="Dataset Type"
+                value={datasetType}
+                onChange={(e) => {
+                  setDatasetType(e.target.value as DatasetType)
+                  setDatasetPath('')
+                }}
+                options={[
+                  { value: 'delta_table', label: 'Delta Table' },
+                  { value: 'csv', label: 'CSV File' },
+                  { value: 'excel', label: 'Excel File' },
+                ]}
+                helperText="Select the type of golden dataset"
+              />
+
+              <Input
+                label={
+                  datasetType === 'delta_table'
+                    ? 'Delta Table Path'
+                    : datasetType === 'csv'
+                    ? 'CSV File Path'
+                    : 'Excel File Path'
+                }
+                value={datasetPath}
+                onChange={(e) => {
+                  setDatasetPath(e.target.value)
+                  if (e.target.value) {
+                    setAutoGenerateQueries(false)
+                    setCorpusTable('')
+                  }
+                }}
+                placeholder={
+                  datasetType === 'delta_table'
+                    ? 'e.g., catalog.schema.queries_table'
+                    : datasetType === 'csv'
+                    ? 'e.g., /path/to/file.csv'
+                    : 'e.g., /path/to/file.xlsx'
+                }
+                helperText={
+                  datasetType === 'delta_table'
+                    ? 'Fully qualified table name (catalog.schema.table)'
+                    : 'Path to the file in Databricks workspace or DBFS'
+                }
+              />
+            </div>
+          </div>
+
+          {/* Divider */}
+          <div className="flex items-center">
+            <div className="flex-grow border-t border-gray-300"></div>
+            <span className="px-4 text-sm text-databricks-gray-500 font-medium">OR</span>
+            <div className="flex-grow border-t border-gray-300"></div>
+          </div>
+
+          {/* Option 2: Auto-Generate Queries */}
+          <div className="border border-gray-200 rounded-lg p-4">
+            <h3 className="text-md font-semibold text-databricks-gray-900 mb-3">
+              Option 2: Auto-Generate Queries
+            </h3>
+            <p className="text-sm text-databricks-gray-600 mb-4">
+              Generate synthetic evaluation queries from your document corpus using LLM
+            </p>
+
+            <div className="space-y-4">
+              <Input
+                label="Corpus Table"
+                value={corpusTable}
+                onChange={(e) => {
+                  setCorpusTable(e.target.value)
+                  if (e.target.value) {
+                    setAutoGenerateQueries(true)
+                    setDatasetPath('')
+                  } else {
+                    setAutoGenerateQueries(false)
+                  }
+                }}
+                placeholder="e.g., catalog.schema.documents"
+                helperText="Fully qualified table name containing your documents (must have 'text' column)"
+              />
+
+              {corpusTable && (
+                <div className="grid grid-cols-2 gap-4">
+                  <Input
+                    label="Number of Queries"
+                    type="number"
+                    value={numQueries.toString()}
+                    onChange={(e) => setNumQueries(parseInt(e.target.value) || 50)}
+                    placeholder="50"
+                    helperText="Number of queries to generate"
+                  />
+                  <Select
+                    label="Query Style"
+                    value={queryStyle}
+                    onChange={(e) => setQueryStyle(e.target.value)}
+                    options={[
+                      { value: 'keyword', label: 'Keyword (2-5 words)' },
+                      { value: 'natural', label: 'Natural (full questions)' },
+                      { value: 'mixed', label: 'Mixed' },
+                    ]}
+                    helperText="Style of queries to generate"
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+
+          <Input
+            label="Top K"
+            type="number"
+            value={topK.toString()}
+            onChange={(e) => setTopK(parseInt(e.target.value) || 10)}
+            placeholder="10"
+            helperText="Number of top results to retrieve"
+          />
+
+          {/* Advanced Options */}
+          <div className="border-t pt-4 mt-4">
+            <h3 className="text-sm font-semibold text-databricks-gray-900 mb-3">
+              Advanced Options
+            </h3>
+
+            <div className="flex items-center space-x-2 mb-4">
+              <input
+                type="checkbox"
+                id="compareQueryTypes"
+                checked={compareQueryTypes}
+                onChange={(e) => setCompareQueryTypes(e.target.checked)}
+                className="w-4 h-4 text-databricks-blue border-gray-300 rounded focus:ring-databricks-blue"
+              />
+              <label htmlFor="compareQueryTypes" className="text-sm font-medium text-databricks-gray-900">
+                Compare query types (FULL_TEXT, ANN, HYBRID)
+              </label>
+            </div>
+            <p className="text-xs text-databricks-gray-600 -mt-2 ml-6 mb-4">
+              Test and compare different search methods on the same index
+            </p>
 
             <Input
-              label={
-                datasetType === 'delta_table'
-                  ? 'Delta Table Path'
-                  : datasetType === 'csv'
-                  ? 'CSV File Path'
-                  : 'Excel File Path'
-              }
-              value={datasetPath}
-              onChange={(e) => setDatasetPath(e.target.value)}
-              placeholder={
-                datasetType === 'delta_table'
-                  ? 'e.g., catalog.schema.queries_table'
-                  : datasetType === 'csv'
-                  ? 'e.g., /path/to/file.csv'
-                  : 'e.g., /path/to/file.xlsx'
-              }
-              required
-              helperText={
-                datasetType === 'delta_table'
-                  ? 'Fully qualified table name (catalog.schema.table)'
-                  : 'Path to the file in Databricks workspace or DBFS'
-              }
+              label="LLM Judge Endpoint (Optional)"
+              value={judgeModelEndpoint}
+              onChange={(e) => setJudgeModelEndpoint(e.target.value)}
+              placeholder="e.g., databricks-meta-llama-3-1-70b-instruct"
+              helperText="LLM endpoint for relevance scoring without ground truth labels. Leave empty to use ground truth if available."
             />
-
-            <Input
-              label="Top K"
-              type="number"
-              value={topK.toString()}
-              onChange={(e) => setTopK(parseInt(e.target.value) || 10)}
-              placeholder="10"
-              helperText="Number of top results to retrieve"
-            />
+          </div>
 
             {error && (
               <div className="p-3 bg-red-50 border border-red-200 rounded-md">
@@ -332,7 +492,13 @@ export default function Evaluate() {
               variant="primary"
               onClick={handleSubmit}
               isLoading={isSubmitting}
-              disabled={!selectedProjectId || !selectedRunId || !datasetPath || isSubmitting}
+              disabled={
+                !selectedProjectId ||
+                !selectedRunId ||
+                isSubmitting ||
+                (!autoGenerateQueries && !datasetPath) ||
+                (autoGenerateQueries && !corpusTable)
+              }
               icon={<PlayCircle className="w-4 h-4" />}
               className="w-full"
             >
@@ -344,31 +510,66 @@ export default function Evaluate() {
       {/* Info Box */}
       <Card className="mt-6 bg-databricks-gray-50">
         <h3 className="text-sm font-semibold text-databricks-gray-900 mb-3">
-          Evaluation Requirements
+          How to Use Evaluation
         </h3>
-        <ul className="space-y-2 text-sm text-databricks-gray-700">
-          <li className="flex items-start">
-            <span className="mr-2">•</span>
-            <span>
-              Your dataset must contain a <code className="bg-gray-100 px-1 rounded">query_text</code> column
-            </span>
-          </li>
-          <li className="flex items-start">
-            <span className="mr-2">•</span>
-            <span>
-              Optionally include an <code className="bg-gray-100 px-1 rounded">expected_chunks</code> column with JSON array of chunk IDs for labeled evaluation
-            </span>
-          </li>
-          <li className="flex items-start">
-            <span className="mr-2">•</span>
-            <span>The evaluation will test Recall@K and NDCG@K metrics</span>
-          </li>
-          <li className="flex items-start">
-            <span className="mr-2">•</span>
-            <span>Results will be logged to MLflow and viewable in the Review section</span>
-          </li>
-        </ul>
+        <div className="space-y-4 text-sm text-databricks-gray-700">
+          <div>
+            <p className="font-semibold mb-2">Evaluation Options:</p>
+            <ul className="space-y-2 ml-4">
+              <li className="flex items-start">
+                <span className="mr-2">1.</span>
+                <span>
+                  <strong>Upload Golden Dataset:</strong> Use a pre-existing dataset with <code className="bg-gray-100 px-1 rounded">query_text</code> column. Include <code className="bg-gray-100 px-1 rounded">expected_chunks</code> for labeled evaluation with ground truth.
+                </span>
+              </li>
+              <li className="flex items-start">
+                <span className="mr-2">2.</span>
+                <span>
+                  <strong>Auto-Generate Queries:</strong> Generate synthetic queries from your corpus table using LLM. Specify corpus table, number of queries, and query style. No manual dataset needed.
+                </span>
+              </li>
+            </ul>
+          </div>
+
+          <div>
+            <p className="font-semibold mb-2">Advanced Features:</p>
+            <ul className="space-y-2 ml-4">
+              <li className="flex items-start">
+                <span className="mr-2">•</span>
+                <span>
+                  <strong>Query Type Comparison:</strong> Test FULL_TEXT (keyword), ANN (semantic), and HYBRID search on the same queries to find the best method.
+                </span>
+              </li>
+              <li className="flex items-start">
+                <span className="mr-2">•</span>
+                <span>
+                  <strong>LLM Judge:</strong> Score relevance without ground truth labels using an LLM endpoint (0-3 scale). Useful when you don't have expected_chunks.
+                </span>
+              </li>
+            </ul>
+          </div>
+
+          <div>
+            <p className="font-semibold mb-2">Metrics & Results:</p>
+            <ul className="space-y-2 ml-4">
+              <li className="flex items-start">
+                <span className="mr-2">•</span>
+                <span>Evaluation computes Recall@K, NDCG@K, Precision@K, and LLM relevance scores</span>
+              </li>
+              <li className="flex items-start">
+                <span className="mr-2">•</span>
+                <span>Results are logged to MLflow experiments and saved to Delta tables</span>
+              </li>
+              <li className="flex items-start">
+                <span className="mr-2">•</span>
+                <span>View detailed analytics including score distributions and top/bottom queries in Databricks job output</span>
+              </li>
+            </ul>
+          </div>
+        </div>
       </Card>
+        </>
+      )}
     </div>
   )
 }

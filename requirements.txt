@@ -8,9 +8,12 @@ pydantic>=2.4.0
 pydantic-settings>=2.0.0
 
 # Databricks SDK and Connectors
-databricks-sdk>=0.12.0
+databricks-sdk>=0.61.0
 databricks-sql-connector>=3.0.0
 databricks-vectorsearch>=0.22
+
+# PostgreSQL Driver (for Lakebase)
+psycopg2-binary>=2.9.0
 
 # MLflow for Experiment Tracking
 mlflow>=2.8.0

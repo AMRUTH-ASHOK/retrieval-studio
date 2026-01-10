@@ -417,23 +417,38 @@ export default function Build() {
         </p>
       </div>
 
-      {!selectedProjectId && (
-        <div className="mb-6 p-4 bg-yellow-50 border border-yellow-200 rounded-md">
-          <p className="text-sm text-yellow-800">
-            Please select a project from the sidebar to start building.
-          </p>
-        </div>
-      )}
+      {!selectedProjectId ? (
+        <Card>
+          <div className="text-center py-12">
+            <div className="w-16 h-16 mx-auto mb-4 bg-yellow-100 rounded-full flex items-center justify-center">
+              <Clock className="w-8 h-8 text-yellow-600" />
+            </div>
+            <h3 className="text-lg font-medium text-databricks-gray-900 mb-2">
+              No Project Selected
+            </h3>
+            <p className="text-sm text-databricks-gray-600 mb-6 max-w-md mx-auto">
+              You need to select or create a project before you can create a build.
+              Please go to the Projects page and select a project to continue.
+            </p>
+            <Button
+              variant="primary"
+              onClick={() => navigate('/projects')}
+            >
+              Go to Projects
+            </Button>
+          </div>
+        </Card>
+      ) : (
+        <>
+          {selectedProject && (
+            <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-md">
+              <p className="text-sm text-blue-900">
+                <span className="font-medium">Current project:</span> {selectedProject.project_name}
+              </p>
+            </div>
+          )}
 
-      {selectedProject && (
-        <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-md">
-          <p className="text-sm text-blue-900">
-            <span className="font-medium">Current project:</span> {selectedProject.project_name}
-          </p>
-        </div>
-      )}
-
-      <Card>
+          <Card>
         {/* Progress Steps */}
         <div className="mb-8">
           <div className="flex items-center justify-between">
@@ -679,6 +694,8 @@ export default function Build() {
             )}
           </CardContent>
         </Card>
+      )}
+        </>
       )}
     </div>
   )

@@ -2,7 +2,18 @@ import api from './api'
 import { Evaluation } from '../types'
 
 export const evaluationsApi = {
-  create: async (data: { run_id: string; queries_table: string; dataset_type?: string; top_k?: number }): Promise<Evaluation> => {
+  create: async (data: {
+    run_id: string
+    queries_table?: string
+    corpus_table?: string
+    dataset_type?: string
+    top_k?: number
+    auto_generate_queries?: boolean
+    num_queries?: number
+    query_style?: string
+    compare_query_types?: boolean
+    judge_model_endpoint?: string
+  }): Promise<Evaluation> => {
     const response = await api.post('/evaluations', data)
     return response.data
   },

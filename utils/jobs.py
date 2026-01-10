@@ -81,12 +81,18 @@ def submit_eval_job(
     w: WorkspaceClient,
     notebook_path: str,
     build_run_id: str,
-    queries_table: str,
     project_name: str,
     catalog: str,
     schema: str,
+    queries_table: str = None,
+    corpus_table: str = None,
     dataset_type: str = "delta_table",
     top_k: int = 10,
+    auto_generate_queries: bool = False,
+    num_queries: int = 50,
+    query_style: str = "keyword",
+    compare_query_types: bool = False,
+    judge_model_endpoint: str = None,
     timeout_minutes: int = 30,
     compute_size: str = None
 ) -> int:
@@ -118,12 +124,23 @@ def submit_eval_job(
         base_parameters = {
             "build_run_id": build_run_id,
             "project_name": project_name,
-            "queries_table": queries_table,
             "dataset_type": dataset_type,
             "top_k": str(top_k),
             "catalog": catalog,
             "schema": schema,
+            "auto_generate_queries": str(auto_generate_queries).lower(),
+            "num_queries": str(num_queries),
+            "query_style": query_style,
+            "compare_query_types": str(compare_query_types).lower(),
         }
+        
+        # Add optional parameters
+        if queries_table:
+            base_parameters["queries_table"] = queries_table
+        if corpus_table:
+            base_parameters["corpus_table"] = corpus_table
+        if judge_model_endpoint:
+            base_parameters["judge_model_endpoint"] = judge_model_endpoint
         
         timeout_seconds = (timeout_minutes + 15) * 60
         

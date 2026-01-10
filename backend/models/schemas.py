@@ -46,9 +46,15 @@ class BuildJobResponse(BaseModel):
 
 class EvaluationCreate(BaseModel):
     run_id: str
-    queries_table: str
+    queries_table: Optional[str] = None  # Required if auto_generate_queries is false
+    corpus_table: Optional[str] = None  # Required if auto_generate_queries is true
     dataset_type: Optional[str] = "delta_table"
     top_k: Optional[int] = 10
+    auto_generate_queries: Optional[bool] = False
+    num_queries: Optional[int] = 50  # Number of queries to generate
+    query_style: Optional[str] = "keyword"  # keyword, natural, or mixed
+    compare_query_types: Optional[bool] = False  # Compare FULL_TEXT, ANN, HYBRID
+    judge_model_endpoint: Optional[str] = None  # LLM judge endpoint for scoring without ground truth
 
 
 class EvaluationResponse(BaseModel):

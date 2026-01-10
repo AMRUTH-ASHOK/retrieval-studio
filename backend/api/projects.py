@@ -11,7 +11,7 @@ from backend.config import settings
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from utils.state import get_all_projects, get_project, create_project
+from utils.postgres_state import get_all_projects, get_project, create_project
 
 router = APIRouter()
 
@@ -20,7 +20,7 @@ router = APIRouter()
 async def list_projects(sql_connector=Depends(get_user_sql_connector)):
     """Get all projects"""
     try:
-        projects = get_all_projects(sql_connector, settings.CATALOG, settings.SCHEMA)
+        projects = get_all_projects()
         return projects
     except Exception as e:
         import traceback
@@ -32,7 +32,7 @@ async def list_projects(sql_connector=Depends(get_user_sql_connector)):
 async def get_project_by_id(project_id: str, sql_connector=Depends(get_user_sql_connector)):
     """Get project by ID"""
     try:
-        project = get_project(sql_connector, settings.CATALOG, settings.SCHEMA, project_id)
+        project = get_project(project_id)
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
         return project
@@ -50,9 +50,9 @@ async def create_new_project(
     """Create a new project"""
     try:
         # Ensure tables are initialized first
-        from utils.state import initialize_tables
+        from utils.postgres_state import initialize_tables
         try:
-            initialize_tables(sql_connector, settings.CATALOG, settings.SCHEMA)
+            initialize_tables()
         except Exception as init_error:
             # Log but continue - tables might already exist
             import logging
@@ -60,12 +60,11 @@ async def create_new_project(
         
         project_id = str(uuid.uuid4())
         created_project = create_project(
-            sql_connector,
-            settings.CATALOG,
-            settings.SCHEMA,
-            project_id,
-            project.project_name,
-            project.description
+            project_id=project_id,
+            project_name=project.project_name,
+            description=project.description,
+            catalog=settings.CATALOG,
+            schema=settings.SCHEMA
         )
         return created_project
     except Exception as e:

@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 from typing import Optional, List, Dict, Any
 import os
 import sys
+import uuid
 
 # Add project paths
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -41,10 +42,10 @@ from backend.models.schemas import ProjectCreate, ProjectResponse, BuildJobCreat
 async def list_projects_no_trailing_slash(sql_connector=Depends(get_app_sql_connector)):
     """List projects handler for /api/projects (without trailing slash)"""
     try:
-        from utils.state import get_all_projects
+        from utils.postgres_state import get_all_projects
         import logging
-        logging.info(f"Fetching projects from {settings.CATALOG}.{settings.SCHEMA}")
-        projects = get_all_projects(sql_connector, settings.CATALOG, settings.SCHEMA)
+        logging.info(f"Fetching projects from Postgres")
+        projects = get_all_projects()
         logging.info(f"Found {len(projects)} projects")
         return projects
     except Exception as e:
@@ -59,11 +60,11 @@ async def create_project_no_trailing_slash(
 ):
     """Create project handler for /api/projects (without trailing slash)"""
     import uuid
-    from utils.state import create_project, initialize_tables
+    from utils.postgres_state import create_project, initialize_tables
     try:
         # Ensure tables are initialized first
         try:
-            initialize_tables(sql_connector, settings.CATALOG, settings.SCHEMA)
+            initialize_tables()
         except Exception as init_error:
             # Log but continue - tables might already exist
             import logging
@@ -71,12 +72,11 @@ async def create_project_no_trailing_slash(
         
         project_id = str(uuid.uuid4())
         created_project = create_project(
-            sql_connector,
-            settings.CATALOG,
-            settings.SCHEMA,
-            project_id,
-            project.project_name,
-            project.description
+            project_id=project_id,
+            project_name=project.project_name,
+            description=project.description,
+            catalog=settings.CATALOG,
+            schema=settings.SCHEMA
         )
         return created_project
     except Exception as e:
@@ -92,55 +92,73 @@ async def create_build_job_no_trailing_slash(
 ):
     """Create build job handler for /api/builds (without trailing slash)"""
     try:
-        from utils.state import create_run, update_run_state, get_project, get_run
+        print(f"[DEBUG MAIN] === BUILD JOB SUBMISSION START ===")
+        print(f"[DEBUG MAIN] Project ID: {build_request.project_id}")
+        from utils.postgres_state import create_build as create_run, update_build_state as update_run_state, get_project, get_build as get_run
         from utils.jobs import submit_build_job
-        
+
         # Get project details
-        project = get_project(sql_connector, settings.CATALOG, settings.SCHEMA, build_request.project_id)
+        print(f"[DEBUG MAIN] Step 1: Getting project...")
+        project = get_project(build_request.project_id)
         if not project:
+            print(f"[DEBUG MAIN] ❌ Project not found")
             raise HTTPException(status_code=404, detail="Project not found")
+        print(f"[DEBUG MAIN] ✅ Project found: {project.get('project_name')}")
         
         # Prepare config with catalog and schema
+        print(f"[DEBUG MAIN] Step 2: Preparing config...")
         config = build_request.config.model_dump()
         config["catalog"] = settings.CATALOG
         config["schema"] = settings.SCHEMA
-        
-        # Create run record first
-        run_id = create_run(
-            sql_connector=sql_connector,
-            catalog=settings.CATALOG,
-            schema=settings.SCHEMA,
+        config["project_name"] = project["project_name"]
+        print(f"[DEBUG MAIN] Config prepared")
+
+        # Create run record first - generate UUID
+        print(f"[DEBUG MAIN] Step 3: Creating build record...")
+        run_id = str(uuid.uuid4())
+        print(f"[DEBUG MAIN] Generated run_id: {run_id}")
+        created_build = create_run(
+            run_id=run_id,
             project_id=build_request.project_id,
             project_name=project["project_name"],
             config=config
         )
-        
+        print(f"[DEBUG MAIN] ✅ Build record created")
+
         # Submit the build job
+        print(f"[DEBUG MAIN] Step 4: Submitting job to Databricks...")
         job_run_id = submit_build_job(
             w=w,
             notebook_path=settings.BUILD_NOTEBOOK_PATH,
             run_id=run_id,
             config=config
         )
-        
+        print(f"[DEBUG MAIN] ✅ Job submitted: {job_run_id}")
+
         # Update run with job_run_id
+        print(f"[DEBUG MAIN] Step 5: Updating build with job_run_id...")
         update_run_state(
-            sql_connector=sql_connector,
-            catalog=settings.CATALOG,
-            schema=settings.SCHEMA,
             run_id=run_id,
             state="RUNNING",
-            build_job_run_id=job_run_id
+            job_run_id=job_run_id
         )
-        
+        print(f"[DEBUG MAIN] ✅ Build updated")
+
         # Get the created run
-        run = get_run(sql_connector, settings.CATALOG, settings.SCHEMA, run_id)
+        print(f"[DEBUG MAIN] Step 6: Retrieving final build record...")
+        run = get_run(run_id)
+        print(f"[DEBUG MAIN] === BUILD JOB SUBMISSION SUCCESS ===")
         return run
-        
+
     except HTTPException:
+        print(f"[DEBUG MAIN] === BUILD JOB FAILED (HTTPException) ===")
         raise
     except Exception as e:
+        print(f"[DEBUG MAIN] === BUILD JOB FAILED ===")
+        print(f"[DEBUG MAIN] Error type: {type(e).__name__}")
+        print(f"[DEBUG MAIN] Error: {e}")
         import traceback
+        traceback.print_exc()
         error_detail = f"Failed to submit build job: {str(e)}\n{traceback.format_exc()}"
         raise HTTPException(status_code=500, detail=error_detail)
 
@@ -155,53 +173,99 @@ async def create_evaluation_no_trailing_slash(
     """Submit evaluation job handler for /api/evaluations (without trailing slash)"""
     try:
         from utils.jobs import submit_eval_job, get_job_run_status, get_job_url
-        from utils.state import get_run, update_run_state
+        from utils.postgres_state import get_build as get_run, update_build_state as update_run_state
         import uuid
-        
+
         # Get build run to extract project_name
-        build_run = get_run(sql_connector, settings.CATALOG, settings.SCHEMA, eval_request.run_id)
+        build_run = get_run(eval_request.run_id)
         if not build_run:
             raise HTTPException(status_code=404, detail="Build run not found")
         
         project_name = build_run.get("project_name", "default")
         top_k = eval_request.top_k or 10
         dataset_type = eval_request.dataset_type or "delta_table"
+        auto_generate = eval_request.auto_generate_queries or False
         
+        # Validate required parameters based on mode
+        if auto_generate:
+            if not eval_request.corpus_table:
+                raise HTTPException(status_code=400, detail="corpus_table is required when auto_generate_queries is true")
+        else:
+            if not eval_request.queries_table:
+                raise HTTPException(status_code=400, detail="queries_table is required when auto_generate_queries is false")
+
+        # Determine which notebook to use based on features
+        # Use advanced notebook if any advanced features are enabled
+        use_advanced_notebook = (
+            auto_generate or
+            eval_request.compare_query_types or
+            eval_request.judge_model_endpoint
+        )
+
+        notebook_path = settings.EVAL_NOTEBOOK_PATH
+        if use_advanced_notebook:
+            # Replace eval_notebook with eval_notebook_advanced
+            notebook_path = notebook_path.replace("eval_notebook", "eval_notebook_advanced")
+
         # Submit the evaluation job
         job_run_id = submit_eval_job(
             w=w,
-            notebook_path=settings.EVAL_NOTEBOOK_PATH,
+            notebook_path=notebook_path,
             build_run_id=eval_request.run_id,
             queries_table=eval_request.queries_table,
+            corpus_table=eval_request.corpus_table,
             project_name=project_name,
             catalog=settings.CATALOG,
             schema=settings.SCHEMA,
             dataset_type=dataset_type,
-            top_k=top_k
+            top_k=top_k,
+            auto_generate_queries=auto_generate,
+            num_queries=eval_request.num_queries or 50,
+            query_style=eval_request.query_style or "keyword",
+            compare_query_types=eval_request.compare_query_types or False,
+            judge_model_endpoint=eval_request.judge_model_endpoint
         )
         
         # Get job run details to return timestamps
         job_run_status = get_job_run_status(w, job_run_id)
         job_url = get_job_url(w, job_run_id)
-        
-        # Update build run with eval_job_run_id
-        update_run_state(
-            sql_connector=sql_connector,
-            catalog=settings.CATALOG,
-            schema=settings.SCHEMA,
+
+        # Create evaluation record in Postgres
+        from utils.postgres_state import create_evaluation, update_evaluation_state
+        eval_id = str(uuid.uuid4())
+
+        evaluation = create_evaluation(
+            eval_id=eval_id,
             run_id=eval_request.run_id,
-            eval_job_run_id=job_run_id
+            project_id=build_run.get("project_id"),
+            queries_table=eval_request.queries_table,
+            corpus_table=eval_request.corpus_table,
+            dataset_type=dataset_type,
+            top_k=top_k,
+            auto_generate_queries=auto_generate,
+            num_queries=eval_request.num_queries,
+            query_style=eval_request.query_style,
+            compare_query_types=eval_request.compare_query_types,
+            judge_model_endpoint=eval_request.judge_model_endpoint
         )
-        
+
+        # Update evaluation with job details
+        evaluation = update_evaluation_state(
+            eval_id=eval_id,
+            state="RUNNING",
+            job_run_id=job_run_id,
+            job_url=job_url
+        )
+
         # Return evaluation details
         return {
-            "eval_id": str(uuid.uuid4()),
-            "run_id": eval_request.run_id,
+            "eval_id": eval_id,
+            "run_id": eval_id,  # Frontend expects run_id for status polling
             "state": "RUNNING",
             "job_id": str(job_run_id),
             "job_url": job_url,
-            "created_at": job_run_status.get("start_time"),
-            "updated_at": job_run_status.get("start_time")
+            "created_at": evaluation.get("created_at"),
+            "updated_at": evaluation.get("updated_at")
         }
     except HTTPException:
         raise
