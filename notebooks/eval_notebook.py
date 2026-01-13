@@ -29,7 +29,7 @@ dbutils.widgets.text("judge_model_endpoint", "databricks-meta-llama-3-1-70b-inst
 dbutils.widgets.text("enable_rich_analytics", "false")  # Set to "false" to skip rich analytics section
 
 # COMMAND ----------
-# MAGIC %pip install databricks-vectorsearch mlflow requests pandas --quiet
+# MAGIC %pip install databricks-vectorsearch mlflow requests pandas openai --quiet
 # COMMAND ----------
 dbutils.library.restartPython()
 
@@ -121,7 +121,7 @@ if auto_generate:
     # Generate queries
     queries_df = generator.generate_queries(
         corpus_table=corpus_table,
-        columns=["text"],  # Adjust based on your schema
+        columns=["chunk_text"],  # Chunks table uses chunk_text column
         num_queries=num_queries,
         style=query_style,
         spark_session=spark
@@ -375,6 +375,8 @@ with mlflow.start_run(run_name=f"eval_{build_run_id[:8]}") as eval_parent:
                         "strategy": strategy_name,
                         "query_type": query_type,
                         "query_text": qtext,
+                        "expected_chunks": json.dumps(expected_ids) if expected_ids else None,
+                        "retrieved_chunks": json.dumps(retrieved),
                         "metrics": json.dumps(metrics),
                     })
 

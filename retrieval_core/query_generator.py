@@ -11,7 +11,7 @@ import json
 class QueryGenerator:
     """Generates synthetic queries from document corpus using LLM"""
 
-    def __init__(self, model_endpoint: str = "databricks-meta-llama-3-1-70b-instruct", random_seed: int = None):
+    def __init__(self, model_endpoint: str = "databricks-claude-sonnet-4-5", random_seed: int = None):
         """
         Initialize query generator
 
@@ -29,20 +29,36 @@ class QueryGenerator:
         self._setup_api_client()
 
     def _setup_api_client(self):
-        """Setup API client for Databricks Foundation Model API"""
+        """Setup OpenAI client for Databricks serving endpoints"""
         try:
-            from databricks.sdk import WorkspaceClient
-            from databricks.sdk.core import Config
+            from openai import OpenAI
 
-            cfg = Config()
-            self.w = WorkspaceClient(config=cfg)
-            self.api_token = cfg.token or self.w.config.token
-            self.api_url = cfg.host or self.w.config.host
+            # Get token from notebook context
+            try:
+                import IPython
+                dbutils = IPython.get_ipython().user_ns.get('dbutils')
+                if dbutils:
+                    self.api_token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().getOrElse(None)
+                else:
+                    self.api_token = None
+            except:
+                self.api_token = None
+
+            if not self.api_token:
+                print("❌ Could not get API token from notebook context")
+                self.client = None
+                return
+
+            # Initialize OpenAI client with Databricks endpoint
+            self.client = OpenAI(
+                api_key=self.api_token,
+                base_url="https://cust-e2-us-west-2.cloud.databricks.com/serving-endpoints"
+            )
+            print(f"✅ QueryGenerator initialized with OpenAI client")
+
         except Exception as e:
-            print(f"Warning: Could not setup API client: {e}")
-            self.w = None
-            self.api_token = None
-            self.api_url = None
+            print(f"❌ Failed to initialize OpenAI client: {e}")
+            self.client = None
 
     def set_few_shot_examples(self, examples: List[Dict[str, str]]):
         """
@@ -195,7 +211,9 @@ class QueryGenerator:
 
                 if query and len(query.strip()) > 3:
                     # Try to get doc_id from specified column, fall back to generic ID
-                    doc_id = row.get(doc_id_column) if doc_id_column in row.asDict() else f"doc_{i}"
+                    row_dict = row.asDict()
+                    doc_id = row_dict.get(doc_id_column)
+                    
                     if doc_id is None:
                         doc_id = f"doc_{i}"
 
@@ -307,7 +325,7 @@ Rules:
 
     def _call_llm_api(self, prompt: str, max_tokens: int = 50) -> str:
         """
-        Call Databricks Foundation Model API
+        Call Databricks serving endpoint using OpenAI client
 
         Args:
             prompt: Prompt for the model
@@ -316,34 +334,18 @@ Rules:
         Returns:
             Generated text
         """
-        if not self.api_token or not self.api_url:
-            raise ValueError("API client not configured")
+        if not self.client:
+            raise ValueError("OpenAI client not initialized")
 
-        endpoint_url = f"{self.api_url}/serving-endpoints/{self.model_endpoint}/invocations"
-        headers = {
-            "Authorization": f"Bearer {self.api_token}",
-            "Content-Type": "application/json"
-        }
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_endpoint,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=0.7
+            )
 
-        payload = {
-            "messages": [
-                {"role": "user", "content": prompt}
-            ],
-            "max_tokens": max_tokens,
-            "temperature": 0.7
-        }
+            return response.choices[0].message.content.strip()
 
-        response = requests.post(endpoint_url, json=payload, headers=headers, timeout=60)
-        response.raise_for_status()
-
-        result = response.json()
-
-        # Extract generated text
-        if "choices" in result and len(result["choices"]) > 0:
-            content = result["choices"][0].get("message", {}).get("content", "")
-        elif "predictions" in result and len(result["predictions"]) > 0:
-            content = result["predictions"][0].get("content", "")
-        else:
-            content = str(result)
-
-        return content.strip()
+        except Exception as e:
+            raise ValueError(f"Failed to call LLM API: {e}")

@@ -9,7 +9,7 @@ class RetrievalEvaluator:
 
     def __init__(self, embedding_endpoint: str = None, judge_model_endpoint: str = None):
         self.embedding_endpoint = embedding_endpoint
-        self.judge_model_endpoint = judge_model_endpoint or "databricks-meta-llama-3-1-70b-instruct"
+        self.judge_model_endpoint = judge_model_endpoint or "databricks-claude-sonnet-4-5"
         self._setup_api_client()
     
     def compute_labeled_metrics(
@@ -132,6 +132,26 @@ class RetrievalEvaluator:
     def _setup_api_client(self):
         """Setup API client for Databricks Foundation Model API"""
         try:
+            # Try to get credentials from notebook context first (when running in Databricks)
+            try:
+                # Method 1: Get from spark config (most reliable in notebooks)
+                from pyspark.sql import SparkSession
+                spark = SparkSession.builder.getOrCreate()
+                self.api_token = spark.conf.get("spark.databricks.token", None)
+                self.api_url = spark.conf.get("spark.databricks.workspaceUrl", None)
+
+                if self.api_token and self.api_url:
+                    # Ensure URL has https://
+                    if not self.api_url.startswith("http"):
+                        self.api_url = f"https://{self.api_url}"
+                    self.w = None
+                    print(f"✅ Evaluator using spark config for API credentials")
+                    return
+            except Exception as e:
+                print(f"Could not get credentials from spark config: {e}")
+                pass
+
+            # Fall back to SDK config
             from databricks.sdk import WorkspaceClient
             from databricks.sdk.core import Config
             import os
@@ -152,6 +172,8 @@ class RetrievalEvaluator:
 
             if not self.api_token or not self.api_url:
                 print("Warning: Could not retrieve API token or host. LLM judge may not work.")
+            else:
+                print(f"✅ Evaluator using SDK config for API credentials")
 
         except Exception as e:
             print(f"Warning: Could not setup API client: {e}")

@@ -245,7 +245,6 @@ export default function Evaluate() {
 
       // Reset form (but keep showing status)
       setDatasetPath('')
-      setCorpusTable('')
       setIsSubmitting(false)
     } catch (error: any) {
       console.error('Failed to submit evaluation:', error)

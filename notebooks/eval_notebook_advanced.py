@@ -121,7 +121,7 @@ if auto_generate:
     # Generate queries
     queries_df = generator.generate_queries(
         corpus_table=corpus_table,
-        columns=["text"],  # Adjust based on your schema
+        columns=["chunk_text"],  # Chunks table uses chunk_text column
         num_queries=num_queries,
         style=query_style,
         spark_session=spark

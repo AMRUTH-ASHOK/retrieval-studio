@@ -77,9 +77,10 @@ User → Frontend (Build Page) → Backend API → Databricks Job
                                                     ↓
                                     Store in Delta + Register Index
                                                     ↓
-                                        Return Results to Backend
+                                    Write Results to PostgreSQL ✨
+                                    (chunks_table, index_name per strategy)
                                                     ↓
-                                        Update PostgreSQL State
+                                        Notebook Exits with Results
 ```
 
 #### 2. Evaluation Pipeline
@@ -155,10 +156,25 @@ retrieval-studio/
 **PostgreSQL (Lakebase) - OLTP:**
 ```sql
 projects       -- Project metadata
-builds         -- Build job tracking
+builds         -- Build job tracking (includes JSONB results column)
 evaluations    -- Evaluation job tracking
 job_runs       -- Databricks job status
 ```
+
+**Build Results Storage:**
+The `builds.results` JSONB column stores build output directly in PostgreSQL:
+```json
+{
+  "baseline": {
+    "status": "SUCCESS",
+    "num_chunks": 23,
+    "chunks_table": "catalog.schema.rs_chunks_project_4_baseline",
+    "index_name": "catalog.schema.rs_index_project_4_baseline"
+  },
+  "semantic": { ... }
+}
+```
+This eliminates the need to call Databricks API for job output (which doesn't support multi-task jobs).
 
 **Delta Lake - OLAP:**
 ```

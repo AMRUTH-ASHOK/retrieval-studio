@@ -18,10 +18,16 @@ type MLflowRun = {
   tags: Record<string, string>
 }
 
+import { evaluationsApi } from '../services/evaluations'
+
+// ... existing imports ...
+
 export default function Review() {
   const { selectedProject, selectedProjectId } = useProject()
   const [mlflowRuns, setMlflowRuns] = useState<MLflowRun[]>([])
   const [selectedRun, setSelectedRun] = useState<MLflowRun | null>(null)
+  const [runResults, setRunResults] = useState<any[]>([])
+  const [isResultsLoading, setIsResultsLoading] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [mlflowUrl, setMlflowUrl] = useState<string | null>(null)
   const [experimentName, setExperimentName] = useState<string | null>(null)
@@ -40,6 +46,36 @@ export default function Review() {
       loadMLflowData()
     }
   }, [selectedProjectId])
+
+  useEffect(() => {
+    if (selectedRun) {
+      loadRunResults()
+    } else {
+      setRunResults([])
+    }
+  }, [selectedRun])
+
+  const loadRunResults = async () => {
+    if (!selectedRun) return
+
+    // Only attempt to load results for runs that might have them
+    // (build_strategy, eval_strategy, eval_parent)
+    if (!['build_strategy', 'eval_strategy', 'eval_parent'].includes(selectedRun.role)) {
+      setRunResults([])
+      return
+    }
+
+    setIsResultsLoading(true)
+    try {
+      const results = await evaluationsApi.getResults(selectedRun.run_id)
+      setRunResults(results)
+    } catch (error) {
+      console.error('Failed to load run results:', error)
+      setRunResults([])
+    } finally {
+      setIsResultsLoading(false)
+    }
+  }
 
   const loadMLflowData = async () => {
     if (!selectedProjectId) return
@@ -223,11 +259,10 @@ export default function Review() {
                 <div
                   key={run.run_id}
                   onClick={() => setSelectedRun(run)}
-                  className={`p-3 border rounded-md cursor-pointer transition-all ${
-                    selectedRun?.run_id === run.run_id
-                      ? 'border-databricks-blue bg-blue-50 ring-2 ring-databricks-blue'
-                      : 'border-databricks-gray-200 hover:border-databricks-gray-300 hover:bg-databricks-gray-50'
-                  }`}
+                  className={`p-3 border rounded-md cursor-pointer transition-all ${selectedRun?.run_id === run.run_id
+                    ? 'border-databricks-blue bg-blue-50 ring-2 ring-databricks-blue'
+                    : 'border-databricks-gray-200 hover:border-databricks-gray-300 hover:bg-databricks-gray-50'
+                    }`}
                 >
                   <div className="flex items-start justify-between mb-2">
                     <div className="flex-1 min-w-0">
@@ -413,18 +448,117 @@ export default function Review() {
 
                 {/* Empty State */}
                 {Object.keys(selectedRun.metrics).length === 0 &&
-                 Object.keys(selectedRun.params).length === 0 &&
-                 Object.keys(selectedRun.tags).length === 0 && (
-                  <div className="text-center py-8">
-                    <p className="text-sm text-databricks-gray-600">
-                      No metrics, parameters, or tags recorded for this run.
-                    </p>
-                  </div>
-                )}
+                  Object.keys(selectedRun.params).length === 0 &&
+                  Object.keys(selectedRun.tags).length === 0 && (
+                    <div className="text-center py-8">
+                      <p className="text-sm text-databricks-gray-600">
+                        No metrics, parameters, or tags recorded for this run.
+                      </p>
+                    </div>
+                  )}
               </div>
             )}
           </Card>
         </div>
+      )}
+
+      {/* Detailed Results Section */}
+      {selectedRun && (
+        <Card className="col-span-1 lg:col-span-3 mt-6">
+          <div className="mb-4 flex justify-between items-center">
+            <h3 className="text-lg font-semibold text-databricks-gray-900">
+              Detailed Results
+            </h3>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={isResultsLoading}
+              onClick={loadRunResults}
+              icon={<RefreshCw className={`w-3 h-3 ${isResultsLoading ? 'animate-spin' : ''}`} />}
+            >
+              Refresh Results
+            </Button>
+          </div>
+
+          {isResultsLoading ? (
+            <div className="flex justify-center py-8">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-databricks-blue"></div>
+            </div>
+          ) : runResults.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Query
+                    </th>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Metrics
+                    </th>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Latency
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {runResults.map((result: any, idx: number) => {
+                    const metrics = typeof result.metrics === 'string'
+                      ? JSON.parse(result.metrics)
+                      : result.metrics || {};
+
+                    return (
+                      <tr key={idx} className="hover:bg-gray-50">
+                        <td className="px-6 py-4 text-sm text-gray-900 max-w-md">
+                          <p className="font-medium mb-1">{result.query_text}</p>
+                          <p className="text-xs text-gray-500 truncate">
+                            Type: {result.query_type}
+                          </p>
+                        </td>
+                        <td className="px-6 py-4 text-sm text-gray-500">
+                          <div className="space-y-1">
+                            {metrics.recall_at_10 !== undefined && (
+                              <div className="flex justify-between w-32">
+                                <span className="text-xs">Recall@10:</span>
+                                <span className="font-mono font-medium">{formatMetricValue(metrics.recall_at_10)}</span>
+                              </div>
+                            )}
+                            {metrics.ndcg_at_10 !== undefined && (
+                              <div className="flex justify-between w-32">
+                                <span className="text-xs">NDCG@10:</span>
+                                <span className="font-mono font-medium">{formatMetricValue(metrics.ndcg_at_10)}</span>
+                              </div>
+                            )}
+                            {metrics.avg_relevance_at_10 !== undefined && (
+                              <div className="flex justify-between w-32">
+                                <span className="text-xs">Relevance:</span>
+                                <span className="font-mono font-medium">{formatMetricValue(metrics.avg_relevance_at_10)}</span>
+                              </div>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-6 py-4 text-sm text-gray-500 whitespace-nowrap">
+                          <div className="flex items-center">
+                            <Clock className="w-3 h-3 mr-1 text-gray-400" />
+                            {metrics.retrieval_latency_ms ? `${Math.round(metrics.retrieval_latency_ms)}ms` : '-'}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="text-center py-8 bg-gray-50 rounded-lg border border-dashed border-gray-300">
+              <p className="text-databricks-gray-600">
+                No detailed results found for this run.
+              </p>
+              <p className="text-xs text-databricks-gray-500 mt-1">
+                Results are available for evaluation runs that have completed successfully.
+              </p>
+            </div>
+          )}
+        </Card>
       )}
 
       {/* Info Section */}

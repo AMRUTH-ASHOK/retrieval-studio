@@ -222,43 +222,26 @@ async def get_project_builds(project_id: str, sql_connector=Depends(get_sql_conn
 
 @router.get("/{run_id}/results")
 async def get_build_results(run_id: str, w=Depends(get_workspace_client), sql_connector=Depends(get_sql_connector)):
-    """Get build job results from notebook output"""
+    """Get build job results from PostgreSQL database"""
     try:
-        from utils.jobs import get_job_run_output
-
         run = get_run(run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Build job not found")
 
-        job_run_id = run.get("job_run_id")
-        if not job_run_id:
-            return {
-                "run_id": run_id,
-                "results": None,
-                "message": "Build job not yet started"
-            }
+        # Get results from PostgreSQL (stored when build completes)
+        build_results = run.get("results")
 
-        # Get job output
-        try:
-            output = get_job_run_output(w, job_run_id)
-            if output and "results" in output:
-                return {
-                    "run_id": run_id,
-                    "results": output["results"],
-                    "status": output.get("status", "UNKNOWN")
-                }
-            else:
-                return {
-                    "run_id": run_id,
-                    "results": None,
-                    "message": "Build results not available yet"
-                }
-        except Exception as e:
-            print(f"Error getting job output: {e}")
+        if build_results:
+            return {
+                "run_id": run_id,
+                "results": build_results,
+                "status": run.get("state", "UNKNOWN")
+            }
+        else:
             return {
                 "run_id": run_id,
                 "results": None,
-                "message": f"Failed to get build results: {str(e)}"
+                "message": "Build results not available yet. Results are stored when build completes successfully."
             }
 
     except HTTPException:

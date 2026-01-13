@@ -37,54 +37,49 @@ async def create_evaluation(
         
         # Validate required parameters based on mode
         if auto_generate:
-            # ALWAYS extract corpus_table directly from build results
-            from utils.jobs import get_job_run_output
+            # Construct corpus_table name using the same logic as build notebook
+            # No need to query Databricks API or PostgreSQL - just pure computation
             try:
-                # Get build job output to extract chunks_table
-                build_job_run_id = build_run.get("job_run_id")
-                if not build_job_run_id:
-                    raise HTTPException(status_code=400, detail="Build job_run_id not found. Cannot auto-extract corpus table.")
+                from backend.utils.build_results import construct_build_results, extract_corpus_table
 
-                build_output = get_job_run_output(w, build_job_run_id)
-                if not build_output or "results" not in build_output:
-                    raise HTTPException(status_code=400, detail="Build results not found.")
+                # Get build config to determine which strategies were enabled
+                build_config = build_run.get("config", {})
+                project_name = build_run.get("project_name")
 
-                # Extract the nested results from notebook output
-                # build_output["results"] contains the notebook JSON output
-                # which itself has a "results" field with strategy outputs
-                notebook_results = build_output.get("results", {})
-                strategy_results = notebook_results.get("results", {}) if isinstance(notebook_results, dict) else {}
+                if not project_name:
+                    raise HTTPException(status_code=400, detail="Project name not found in build record.")
 
-                if not strategy_results:
-                    raise HTTPException(status_code=400, detail="Build strategy results not found.")
+                # Extract enabled strategies from config
+                strategies = []
+                if build_config.get("baseline_enabled"):
+                    strategies.append("baseline")
+                if build_config.get("semantic_enabled"):
+                    strategies.append("semantic")
+                if build_config.get("structured_enabled"):
+                    strategies.append("structured")
 
-                # Find first available chunks_table (prefer baseline, then semantic, then structured)
-                strategies = ['baseline', 'semantic', 'structured']
-                corpus_table = None
+                if not strategies:
+                    # Default to baseline if no strategies specified
+                    strategies = ["baseline"]
 
-                for strategy in strategies:
-                    if strategy in strategy_results and isinstance(strategy_results[strategy], dict):
-                        corpus_table = strategy_results[strategy].get("chunks_table")
-                        if corpus_table:
-                            break
+                # Construct results using same logic as notebook (deterministic)
+                build_results = construct_build_results(
+                    project_name=project_name,
+                    strategies=strategies,
+                    catalog=settings.CATALOG,
+                    schema=settings.SCHEMA
+                )
 
-                # If no preferred strategy found, use first available
-                if not corpus_table:
-                    for strategy, result in strategy_results.items():
-                        if isinstance(result, dict) and result.get("chunks_table"):
-                            corpus_table = result["chunks_table"]
-                            break
+                # Extract corpus_table (prefer baseline, then semantic, then structured)
+                corpus_table = extract_corpus_table(build_results)
 
-                if not corpus_table:
-                    raise HTTPException(status_code=400, detail="No chunks_table found in build results.")
-
-                # Set the auto-extracted corpus_table
+                # Set the auto-constructed corpus_table
                 eval_request.corpus_table = corpus_table
 
             except Exception as e:
                 if isinstance(e, HTTPException):
                     raise
-                raise HTTPException(status_code=400, detail=f"Failed to auto-extract corpus table from build results: {str(e)}")
+                raise HTTPException(status_code=400, detail=f"Failed to construct corpus table: {str(e)}")
         else:
             if not eval_request.queries_table:
                 raise HTTPException(status_code=400, detail="queries_table is required when auto_generate_queries is false")
@@ -111,12 +106,16 @@ async def create_evaluation(
             judge_model_endpoint=eval_request.judge_model_endpoint
         )
         
-        # Get job run details to return timestamps
-        job_run_status = get_job_run_status(w, job_run_id)
-        job_url = get_job_url(w, job_run_id)
+        # Job submitted successfully - now get job details (non-critical)
+        job_url = None
+        try:
+            job_url = get_job_url(w, job_run_id)
+        except Exception as e:
+            print(f"Warning: Failed to get job URL: {e}")
 
         # Create evaluation record in Postgres
         from utils.postgres_state import create_evaluation, update_evaluation_state
+        import datetime
         eval_id = str(uuid.uuid4())
 
         evaluation = create_evaluation(
@@ -149,8 +148,8 @@ async def create_evaluation(
             "state": "RUNNING",
             "job_id": str(job_run_id),
             "job_url": job_url,
-            "created_at": evaluation.get("created_at"),
-            "updated_at": evaluation.get("updated_at")
+            "created_at": evaluation.get("created_at") if evaluation.get("created_at") else datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "updated_at": evaluation.get("updated_at") if evaluation.get("updated_at") else datetime.datetime.now(datetime.timezone.utc).isoformat()
         }
         
     except HTTPException:
@@ -225,15 +224,19 @@ async def get_evaluation_results(run_id: str, sql_connector=Depends(get_sql_conn
         from utils.query_builder import escape_identifier, sanitize_string
 
         # Query evaluation results using parameterized query
+        # Check against build_run_id (parent), eval_run_id (eval parent/child), or build_child_run_id (strategy)
         run_id_safe = sanitize_string(run_id)
 
         query = f"""
             SELECT * FROM {escape_identifier(settings.CATALOG)}.raw.rs_eval_results
             WHERE build_run_id = ?
+               OR eval_run_id = ?
+               OR build_child_run_id = ?
             ORDER BY created_at DESC
         """
 
-        results = sql_connector.execute(query, [run_id_safe])
+        # Pass run_id 3 times for the 3 placeholders
+        results = sql_connector.execute(query, [run_id_safe, run_id_safe, run_id_safe])
         return results
 
     except Exception as e:

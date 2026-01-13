@@ -274,12 +274,32 @@ def get_job_run_output(w: WorkspaceClient, job_run_id: int) -> dict:
         Dictionary with notebook output including status and results
     """
     try:
-        # Get run output from Databricks
-        output = w.jobs.get_run_output(run_id=job_run_id)
-
-        # Get run status
+        # Get run details to check for tasks
         run = w.jobs.get_run(run_id=job_run_id)
         status = run.state.result_state.value if run.state and run.state.result_state else "UNKNOWN"
+
+        # Check if this is a multi-task job
+        if run.tasks and len(run.tasks) > 0:
+            # Multi-task job - get output from the first task (usually "build" task)
+            # Find the main task (task_key="build" or first task)
+            main_task = None
+            for task in run.tasks:
+                if task.task_key == "build":
+                    main_task = task
+                    break
+
+            # If no "build" task found, use first task
+            if not main_task and len(run.tasks) > 0:
+                main_task = run.tasks[0]
+
+            if not main_task:
+                raise JobSubmissionError("No tasks found in job run")
+
+            # Get output from the specific task run
+            output = w.jobs.get_run_output(run_id=main_task.run_id)
+        else:
+            # Single task job - get output directly
+            output = w.jobs.get_run_output(run_id=job_run_id)
 
         # Parse notebook output
         # The notebook_output.result contains the JSON string from dbutils.notebook.exit()
