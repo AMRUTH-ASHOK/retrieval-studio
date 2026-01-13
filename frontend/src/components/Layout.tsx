@@ -118,15 +118,22 @@ export default function Layout({ children }: LayoutProps) {
       {/* Main Content */}
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* Top Bar with Breadcrumbs */}
-        <div className="h-16 bg-white border-b border-databricks-gray-200 flex items-center px-8">
+        <div className="h-16 bg-white border-b border-databricks-gray-200 flex items-center justify-between px-8">
           <div className="flex items-center text-sm text-databricks-gray-600">
-            <span className="text-databricks-blue cursor-pointer hover:underline">
+            <span className="text-databricks-blue cursor-pointer hover:underline font-medium">
+              Databricks
+            </span>
+            <ChevronRight className="w-4 h-4 mx-2" />
+            <span className="text-databricks-gray-700">
               Retrieval Studio
             </span>
             <ChevronRight className="w-4 h-4 mx-2" />
             <span className="text-databricks-gray-900 font-medium">
               {menuItems.find(item => item.path === location.pathname)?.text || 'Dashboard'}
             </span>
+          </div>
+          <div className="flex items-center gap-2 text-xs text-databricks-gray-500">
+            <span className="px-2 py-1 bg-databricks-gray-100 rounded">RAG Optimization Platform</span>
           </div>
         </div>
 
