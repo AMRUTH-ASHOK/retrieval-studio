@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react'
-import { ExternalLink, RefreshCw, ChevronDown, ChevronRight, Clock, CheckCircle, XCircle, PlayCircle } from 'lucide-react'
+import { useState, useEffect, useMemo } from 'react'
+import { ExternalLink, RefreshCw, ChevronDown, ChevronRight, Clock, CheckCircle, XCircle, PlayCircle, BarChart3, TrendingUp } from 'lucide-react'
+import Plot from 'react-plotly.js'
 import { projectsApi } from '../services/projects'
 import { useProject } from '../context/ProjectContext'
 import { Button } from '../components/ui/Button'
@@ -20,8 +21,6 @@ type MLflowRun = {
 
 import { evaluationsApi } from '../services/evaluations'
 
-// ... existing imports ...
-
 export default function Review() {
   const { selectedProject, selectedProjectId } = useProject()
   const [mlflowRuns, setMlflowRuns] = useState<MLflowRun[]>([])
@@ -35,10 +34,14 @@ export default function Review() {
     metrics: boolean
     params: boolean
     tags: boolean
+    charts: boolean
+    details: boolean
   }>({
     metrics: true,
     params: true,
     tags: false,
+    charts: true,
+    details: true,
   })
 
   useEffect(() => {
@@ -58,8 +61,6 @@ export default function Review() {
   const loadRunResults = async () => {
     if (!selectedRun) return
 
-    // Only attempt to load results for runs that might have them
-    // (build_strategy, eval_strategy, eval_parent)
     if (!['build_strategy', 'eval_strategy', 'eval_parent'].includes(selectedRun.role)) {
       setRunResults([])
       return
@@ -82,7 +83,6 @@ export default function Review() {
 
     setIsLoading(true)
     try {
-      // Load both MLflow URL and runs
       const [mlflowData, runsData] = await Promise.all([
         projectsApi.getMLflowExperiment(selectedProjectId),
         projectsApi.getMLflowRuns(selectedProjectId)
@@ -92,7 +92,6 @@ export default function Review() {
       setExperimentName(mlflowData.experiment_name)
       setMlflowRuns(runsData.runs)
 
-      // Auto-select first run if available
       if (runsData.runs.length > 0) {
         setSelectedRun(runsData.runs[0])
       }
@@ -102,6 +101,40 @@ export default function Review() {
       setIsLoading(false)
     }
   }
+
+  // Compute aggregated metrics for comparison
+  const strategyComparison = useMemo(() => {
+    const strategyRuns = mlflowRuns.filter(run => 
+      run.role === 'eval_strategy' && run.status === 'FINISHED'
+    )
+
+    const grouped: Record<string, { metrics: Record<string, number[]>, params: any }> = {}
+
+    strategyRuns.forEach(run => {
+      const strategy = run.params.strategy || run.params.chunking_strategy || 'unknown'
+      if (!grouped[strategy]) {
+        grouped[strategy] = { metrics: {}, params: run.params }
+      }
+
+      Object.entries(run.metrics).forEach(([key, value]) => {
+        if (!grouped[strategy].metrics[key]) {
+          grouped[strategy].metrics[key] = []
+        }
+        grouped[strategy].metrics[key].push(value)
+      })
+    })
+
+    return Object.entries(grouped).map(([strategy, data]) => ({
+      strategy,
+      metrics: Object.fromEntries(
+        Object.entries(data.metrics).map(([key, values]) => [
+          key,
+          values.reduce((a, b) => a + b, 0) / values.length
+        ])
+      ),
+      params: data.params
+    }))
+  }, [mlflowRuns])
 
   const getStatusBadge = (status: string) => {
     const statusMap: Record<string, { variant: 'success' | 'warning' | 'error' | 'info', icon: any }> = {
@@ -165,7 +198,7 @@ export default function Review() {
     return value.toFixed(3)
   }
 
-  const toggleSection = (section: 'metrics' | 'params' | 'tags') => {
+  const toggleSection = (section: 'metrics' | 'params' | 'tags' | 'charts' | 'details') => {
     setExpandedSections(prev => ({
       ...prev,
       [section]: !prev[section]
@@ -178,7 +211,7 @@ export default function Review() {
         <div>
           <h1 className="text-2xl font-semibold text-databricks-gray-900">MLflow Experiment Runs</h1>
           <p className="text-sm text-databricks-gray-600 mt-1">
-            View all runs, metrics, parameters, and tags for this project
+            View all runs, metrics, parameters, and performance comparison
           </p>
         </div>
         <Button
@@ -200,34 +233,198 @@ export default function Review() {
       )}
 
       {selectedProject && (
-        <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-md">
-          <p className="text-sm text-blue-900">
-            <span className="font-medium">Current project:</span> {selectedProject.project_name}
-          </p>
+        <div className="mb-6 p-4 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg">
+          <div className="flex items-center gap-2 mb-2">
+            <BarChart3 className="w-5 h-5 text-databricks-blue" />
+            <p className="text-sm font-semibold text-databricks-gray-900">
+              Current Project: {selectedProject.project_name}
+            </p>
+          </div>
+          {selectedProject.description && (
+            <p className="text-xs text-databricks-gray-600 ml-7">{selectedProject.description}</p>
+          )}
         </div>
       )}
 
+      {/* MLflow Experiment URL Card */}
       {mlflowUrl && experimentName && (
-        <Card className="mb-6 bg-gradient-to-r from-blue-50 to-purple-50 border-2 border-blue-300">
+        <Card className="mb-6 bg-gradient-to-r from-databricks-blue to-databricks-blue-light text-white border-0 shadow-lg">
           <div className="flex items-center justify-between">
-            <div>
-              <h3 className="text-md font-semibold text-databricks-gray-900 mb-2">
-                📊 MLflow Experiment
-              </h3>
-              <p className="text-sm text-databricks-gray-700 font-mono mb-2">
+            <div className="flex-1">
+              <div className="flex items-center gap-2 mb-2">
+                <TrendingUp className="w-5 h-5" />
+                <h3 className="text-lg font-semibold">MLflow Experiment</h3>
+              </div>
+              <p className="text-sm font-mono mb-3 bg-white bg-opacity-20 px-3 py-2 rounded">
                 {experimentName}
               </p>
               <a
                 href={mlflowUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center text-sm text-databricks-blue hover:underline font-medium"
+                className="inline-flex items-center text-sm bg-white text-databricks-blue px-4 py-2 rounded-md hover:bg-opacity-90 transition-all font-medium"
               >
-                <ExternalLink className="w-4 h-4 mr-1" />
+                <ExternalLink className="w-4 h-4 mr-2" />
                 Open in MLflow UI
               </a>
             </div>
           </div>
+        </Card>
+      )}
+
+      {/* Strategy Comparison Charts */}
+      {strategyComparison.length > 0 && (
+        <Card className="mb-6">
+          <button
+            onClick={() => toggleSection('charts')}
+            className="w-full px-4 py-3 flex items-center justify-between hover:bg-databricks-gray-50 transition-colors"
+          >
+            <h3 className="text-lg font-semibold text-databricks-gray-900 flex items-center gap-2">
+              <BarChart3 className="w-5 h-5 text-databricks-blue" />
+              Strategy Performance Comparison
+            </h3>
+            {expandedSections.charts ? (
+              <ChevronDown className="w-5 h-5 text-databricks-gray-600" />
+            ) : (
+              <ChevronRight className="w-5 h-5 text-databricks-gray-600" />
+            )}
+          </button>
+
+          {expandedSections.charts && (
+            <div className="px-4 pb-4 space-y-6">
+              {/* Recall Comparison */}
+              {strategyComparison.some(s => s.metrics.recall_at_10) && (
+                <div className="bg-white p-4 rounded-lg border border-databricks-gray-200">
+                  <h4 className="text-sm font-semibold text-databricks-gray-800 mb-3">Recall@K Comparison</h4>
+                  <Plot
+                    data={[
+                      {
+                        x: strategyComparison.map(s => s.strategy),
+                        y: strategyComparison.map(s => s.metrics.recall_at_5 || 0),
+                        name: 'Recall@5',
+                        type: 'bar',
+                        marker: { color: '#3B5DAA' }
+                      },
+                      {
+                        x: strategyComparison.map(s => s.strategy),
+                        y: strategyComparison.map(s => s.metrics.recall_at_10 || 0),
+                        name: 'Recall@10',
+                        type: 'bar',
+                        marker: { color: '#1B3B78' }
+                      }
+                    ]}
+                    layout={{
+                      barmode: 'group',
+                      height: 300,
+                      margin: { t: 20, b: 60, l: 50, r: 20 },
+                      xaxis: { title: 'Strategy' },
+                      yaxis: { title: 'Recall Score', range: [0, 1] },
+                      showlegend: true,
+                      legend: { orientation: 'h', y: 1.1 }
+                    }}
+                    config={{ responsive: true, displayModeBar: false }}
+                    style={{ width: '100%' }}
+                  />
+                </div>
+              )}
+
+              {/* NDCG Comparison */}
+              {strategyComparison.some(s => s.metrics.ndcg_at_10) && (
+                <div className="bg-white p-4 rounded-lg border border-databricks-gray-200">
+                  <h4 className="text-sm font-semibold text-databricks-gray-800 mb-3">NDCG@K Comparison</h4>
+                  <Plot
+                    data={[
+                      {
+                        x: strategyComparison.map(s => s.strategy),
+                        y: strategyComparison.map(s => s.metrics.ndcg_at_5 || 0),
+                        name: 'NDCG@5',
+                        type: 'bar',
+                        marker: { color: '#2E7D32' }
+                      },
+                      {
+                        x: strategyComparison.map(s => s.strategy),
+                        y: strategyComparison.map(s => s.metrics.ndcg_at_10 || 0),
+                        name: 'NDCG@10',
+                        type: 'bar',
+                        marker: { color: '#1B5E20' }
+                      }
+                    ]}
+                    layout={{
+                      barmode: 'group',
+                      height: 300,
+                      margin: { t: 20, b: 60, l: 50, r: 20 },
+                      xaxis: { title: 'Strategy' },
+                      yaxis: { title: 'NDCG Score', range: [0, 1] },
+                      showlegend: true,
+                      legend: { orientation: 'h', y: 1.1 }
+                    }}
+                    config={{ responsive: true, displayModeBar: false }}
+                    style={{ width: '100%' }}
+                  />
+                </div>
+              )}
+
+              {/* Latency Comparison */}
+              {strategyComparison.some(s => s.metrics.avg_retrieval_latency_ms) && (
+                <div className="bg-white p-4 rounded-lg border border-databricks-gray-200">
+                  <h4 className="text-sm font-semibold text-databricks-gray-800 mb-3">Average Latency Comparison</h4>
+                  <Plot
+                    data={[
+                      {
+                        x: strategyComparison.map(s => s.strategy),
+                        y: strategyComparison.map(s => s.metrics.avg_retrieval_latency_ms || 0),
+                        type: 'bar',
+                        marker: { color: '#F57C00' }
+                      }
+                    ]}
+                    layout={{
+                      height: 300,
+                      margin: { t: 20, b: 60, l: 50, r: 20 },
+                      xaxis: { title: 'Strategy' },
+                      yaxis: { title: 'Latency (ms)' },
+                      showlegend: false
+                    }}
+                    config={{ responsive: true, displayModeBar: false }}
+                    style={{ width: '100%' }}
+                  />
+                </div>
+              )}
+
+              {/* Multi-Metric Radar Chart */}
+              {strategyComparison.length > 0 && (
+                <div className="bg-white p-4 rounded-lg border border-databricks-gray-200">
+                  <h4 className="text-sm font-semibold text-databricks-gray-800 mb-3">Overall Performance Profile</h4>
+                  <Plot
+                    data={strategyComparison.map((strat, idx) => ({
+                      type: 'scatterpolar',
+                      r: [
+                        strat.metrics.recall_at_10 || 0,
+                        strat.metrics.ndcg_at_10 || 0,
+                        strat.metrics.precision_at_10 || 0,
+                        Math.max(0, 1 - (strat.metrics.avg_retrieval_latency_ms || 0) / 200)
+                      ],
+                      theta: ['Recall@10', 'NDCG@10', 'Precision@10', 'Speed'],
+                      fill: 'toself',
+                      name: strat.strategy
+                    }))}
+                    layout={{
+                      height: 400,
+                      polar: {
+                        radialaxis: {
+                          visible: true,
+                          range: [0, 1]
+                        }
+                      },
+                      showlegend: true,
+                      legend: { orientation: 'h', y: -0.15 }
+                    }}
+                    config={{ responsive: true, displayModeBar: false }}
+                    style={{ width: '100%' }}
+                  />
+                </div>
+              )}
+            </div>
+          )}
         </Card>
       )}
 
@@ -445,127 +642,183 @@ export default function Review() {
                     )}
                   </div>
                 )}
-
-                {/* Empty State */}
-                {Object.keys(selectedRun.metrics).length === 0 &&
-                  Object.keys(selectedRun.params).length === 0 &&
-                  Object.keys(selectedRun.tags).length === 0 && (
-                    <div className="text-center py-8">
-                      <p className="text-sm text-databricks-gray-600">
-                        No metrics, parameters, or tags recorded for this run.
-                      </p>
-                    </div>
-                  )}
               </div>
             )}
           </Card>
         </div>
       )}
 
-      {/* Detailed Results Section */}
+      {/* Detailed Evaluation Results Table */}
       {selectedRun && (
         <Card className="col-span-1 lg:col-span-3 mt-6">
-          <div className="mb-4 flex justify-between items-center">
+          <button
+            onClick={() => toggleSection('details')}
+            className="w-full mb-4 flex justify-between items-center hover:bg-databricks-gray-50 transition-colors p-2 rounded"
+          >
             <h3 className="text-lg font-semibold text-databricks-gray-900">
-              Detailed Results
+              📊 Detailed Evaluation Results
             </h3>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={isResultsLoading}
-              onClick={loadRunResults}
-              icon={<RefreshCw className={`w-3 h-3 ${isResultsLoading ? 'animate-spin' : ''}`} />}
-            >
-              Refresh Results
-            </Button>
-          </div>
-
-          {isResultsLoading ? (
-            <div className="flex justify-center py-8">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-databricks-blue"></div>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={isResultsLoading}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  loadRunResults()
+                }}
+                icon={<RefreshCw className={`w-3 h-3 ${isResultsLoading ? 'animate-spin' : ''}`} />}
+              >
+                Refresh
+              </Button>
+              {expandedSections.details ? (
+                <ChevronDown className="w-5 h-5 text-databricks-gray-600" />
+              ) : (
+                <ChevronRight className="w-5 h-5 text-databricks-gray-600" />
+              )}
             </div>
-          ) : runResults.length > 0 ? (
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
-                  <tr>
-                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Query
-                    </th>
-                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Metrics
-                    </th>
-                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Latency
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
-                  {runResults.map((result: any, idx: number) => {
-                    const metrics = typeof result.metrics === 'string'
-                      ? JSON.parse(result.metrics)
-                      : result.metrics || {};
+          </button>
 
-                    return (
-                      <tr key={idx} className="hover:bg-gray-50">
-                        <td className="px-6 py-4 text-sm text-gray-900 max-w-md">
-                          <p className="font-medium mb-1">{result.query_text}</p>
-                          <p className="text-xs text-gray-500 truncate">
-                            Type: {result.query_type}
-                          </p>
-                        </td>
-                        <td className="px-6 py-4 text-sm text-gray-500">
-                          <div className="space-y-1">
-                            {metrics.recall_at_10 !== undefined && (
-                              <div className="flex justify-between w-32">
-                                <span className="text-xs">Recall@10:</span>
-                                <span className="font-mono font-medium">{formatMetricValue(metrics.recall_at_10)}</span>
-                              </div>
-                            )}
-                            {metrics.ndcg_at_10 !== undefined && (
-                              <div className="flex justify-between w-32">
-                                <span className="text-xs">NDCG@10:</span>
-                                <span className="font-mono font-medium">{formatMetricValue(metrics.ndcg_at_10)}</span>
-                              </div>
-                            )}
-                            {metrics.avg_relevance_at_10 !== undefined && (
-                              <div className="flex justify-between w-32">
-                                <span className="text-xs">Relevance:</span>
-                                <span className="font-mono font-medium">{formatMetricValue(metrics.avg_relevance_at_10)}</span>
-                              </div>
-                            )}
-                          </div>
-                        </td>
-                        <td className="px-6 py-4 text-sm text-gray-500 whitespace-nowrap">
-                          <div className="flex items-center">
-                            <Clock className="w-3 h-3 mr-1 text-gray-400" />
-                            {metrics.retrieval_latency_ms ? `${Math.round(metrics.retrieval_latency_ms)}ms` : '-'}
-                          </div>
-                        </td>
+          {expandedSections.details && (
+            <>
+              {isResultsLoading ? (
+                <div className="flex justify-center py-8">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-databricks-blue"></div>
+                </div>
+              ) : runResults.length > 0 ? (
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-databricks-gray-100">
+                      <tr>
+                        <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-databricks-gray-700 uppercase tracking-wider">
+                          Query
+                        </th>
+                        <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-databricks-gray-700 uppercase tracking-wider">
+                          Expected Result
+                        </th>
+                        <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-databricks-gray-700 uppercase tracking-wider">
+                          Retrieved Chunks
+                        </th>
+                        <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-databricks-gray-700 uppercase tracking-wider">
+                          Metrics
+                        </th>
+                        <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-databricks-gray-700 uppercase tracking-wider">
+                          Latency
+                        </th>
                       </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <div className="text-center py-8 bg-gray-50 rounded-lg border border-dashed border-gray-300">
-              <p className="text-databricks-gray-600">
-                No detailed results found for this run.
-              </p>
-              <p className="text-xs text-databricks-gray-500 mt-1">
-                Results are available for evaluation runs that have completed successfully.
-              </p>
-            </div>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {runResults.map((result: any, idx: number) => {
+                        const metrics = typeof result.metrics === 'string'
+                          ? JSON.parse(result.metrics)
+                          : result.metrics || {};
+
+                        return (
+                          <tr key={idx} className="hover:bg-gray-50">
+                            <td className="px-6 py-4 text-sm text-gray-900 max-w-md">
+                              <p className="font-medium mb-1">{result.query_text}</p>
+                              <p className="text-xs text-gray-500">
+                                Type: <span className="font-mono bg-gray-100 px-1 rounded">{result.query_type || 'N/A'}</span>
+                              </p>
+                            </td>
+                            <td className="px-6 py-4 text-sm text-gray-500 max-w-xs">
+                              {result.expected_chunks ? (
+                                <div className="space-y-1">
+                                  {(Array.isArray(result.expected_chunks) ? result.expected_chunks : [result.expected_chunks])
+                                    .slice(0, 3)
+                                    .map((chunk: string, i: number) => (
+                                      <div key={i} className="text-xs bg-green-50 border border-green-200 px-2 py-1 rounded font-mono truncate">
+                                        {chunk}
+                                      </div>
+                                    ))}
+                                  {result.expected_chunks.length > 3 && (
+                                    <p className="text-xs text-gray-400">+{result.expected_chunks.length - 3} more</p>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="text-xs text-gray-400">No ground truth</span>
+                              )}
+                            </td>
+                            <td className="px-6 py-4 text-sm text-gray-500 max-w-xs">
+                              {result.retrieved_chunks ? (
+                                <div className="space-y-1">
+                                  {(Array.isArray(result.retrieved_chunks) ? result.retrieved_chunks : [result.retrieved_chunks])
+                                    .slice(0, 3)
+                                    .map((chunk: string, i: number) => (
+                                      <div key={i} className="text-xs bg-blue-50 border border-blue-200 px-2 py-1 rounded font-mono truncate">
+                                        {chunk}
+                                      </div>
+                                    ))}
+                                  {result.retrieved_chunks.length > 3 && (
+                                    <p className="text-xs text-gray-400">+{result.retrieved_chunks.length - 3} more</p>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="text-xs text-gray-400">No results</span>
+                              )}
+                            </td>
+                            <td className="px-6 py-4 text-sm text-gray-500">
+                              <div className="space-y-1">
+                                {metrics.recall_at_10 !== undefined && (
+                                  <div className="flex justify-between w-40 bg-blue-50 px-2 py-1 rounded">
+                                    <span className="text-xs font-medium">Recall@10:</span>
+                                    <span className="font-mono font-semibold text-databricks-blue">{formatMetricValue(metrics.recall_at_10)}</span>
+                                  </div>
+                                )}
+                                {metrics.ndcg_at_10 !== undefined && (
+                                  <div className="flex justify-between w-40 bg-green-50 px-2 py-1 rounded">
+                                    <span className="text-xs font-medium">NDCG@10:</span>
+                                    <span className="font-mono font-semibold text-green-700">{formatMetricValue(metrics.ndcg_at_10)}</span>
+                                  </div>
+                                )}
+                                {metrics.precision_at_10 !== undefined && (
+                                  <div className="flex justify-between w-40 bg-purple-50 px-2 py-1 rounded">
+                                    <span className="text-xs font-medium">Precision@10:</span>
+                                    <span className="font-mono font-semibold text-purple-700">{formatMetricValue(metrics.precision_at_10)}</span>
+                                  </div>
+                                )}
+                                {metrics.avg_relevance_at_10 !== undefined && (
+                                  <div className="flex justify-between w-40 bg-orange-50 px-2 py-1 rounded">
+                                    <span className="text-xs font-medium">Relevance:</span>
+                                    <span className="font-mono font-semibold text-orange-700">{formatMetricValue(metrics.avg_relevance_at_10)}</span>
+                                  </div>
+                                )}
+                              </div>
+                            </td>
+                            <td className="px-6 py-4 text-sm text-gray-500 whitespace-nowrap">
+                              <div className="flex items-center bg-yellow-50 px-2 py-1 rounded">
+                                <Clock className="w-3 h-3 mr-1 text-yellow-600" />
+                                <span className="font-mono font-medium">
+                                  {metrics.retrieval_latency_ms ? `${Math.round(metrics.retrieval_latency_ms)}ms` : '-'}
+                                </span>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="text-center py-8 bg-gray-50 rounded-lg border border-dashed border-gray-300">
+                  <p className="text-databricks-gray-600">
+                    No detailed results found for this run.
+                  </p>
+                  <p className="text-xs text-databricks-gray-500 mt-1">
+                    Results are available for evaluation runs that have completed successfully.
+                  </p>
+                </div>
+              )}
+            </>
           )}
         </Card>
       )}
 
       {/* Info Section */}
       {mlflowRuns.length > 0 && (
-        <Card className="mt-6 bg-databricks-gray-50">
+        <Card className="mt-6 bg-databricks-gray-50 border-databricks-blue border-l-4">
           <h3 className="text-sm font-semibold text-databricks-gray-900 mb-3">
-            💡 About MLflow Runs
+            💡 About MLflow Runs & Metrics
           </h3>
           <ul className="space-y-2 text-sm text-databricks-gray-700">
             <li className="flex items-start">
@@ -583,13 +836,13 @@ export default function Review() {
             <li className="flex items-start">
               <span className="mr-2">•</span>
               <span>
-                <strong>Metrics:</strong> Track retrieval quality (recall, NDCG, precision) and performance (latency, throughput).
+                <strong>Metrics visualization:</strong> Charts compare strategies across key metrics. Use radar charts for overall performance comparison.
               </span>
             </li>
             <li className="flex items-start">
               <span className="mr-2">•</span>
               <span>
-                <strong>Parameters:</strong> Capture configuration like chunking strategy, embedding model, top-k values, and data sources.
+                <strong>Detailed results:</strong> View per-query metrics, expected vs. actual chunks, and latency for deep analysis.
               </span>
             </li>
           </ul>
