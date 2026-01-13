@@ -41,10 +41,25 @@ export default function Layout({ children }: LayoutProps) {
         style={{ width: drawerWidth }}
       >
         {/* Logo/Header */}
-        <div className="h-16 flex items-center px-6 border-b border-databricks-gray-200">
-          <h1 className="text-lg font-semibold text-databricks-gray-900">
-            🔍 Retrieval Studio
-          </h1>
+        <div className="h-16 flex items-center px-6 border-b border-databricks-gray-200 bg-gradient-to-r from-databricks-blue to-databricks-blue-light">
+          <div className="flex items-center gap-3">
+            <svg className="w-8 h-8" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <defs>
+                <linearGradient id="logoGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" style={{stopColor: '#FF3621', stopOpacity: 1}} />
+                  <stop offset="100%" style={{stopColor: '#ffffff', stopOpacity: 1}} />
+                </linearGradient>
+              </defs>
+              <path d="M50 5 L90 30 L90 70 L50 95 L10 70 L10 30 Z" fill="url(#logoGrad)"/>
+              <ellipse cx="50" cy="35" rx="20" ry="7" fill="white" opacity="0.9"/>
+              <path d="M30 35 L30 42 Q30 47 50 47 Q70 47 70 42 L70 35" fill="white" opacity="0.7"/>
+              <circle cx="50" cy="65" r="8" fill="none" stroke="white" strokeWidth="2.5"/>
+              <line x1="56" y1="71" x2="62" y2="77" stroke="white" strokeWidth="2.5" strokeLinecap="round"/>
+            </svg>
+            <h1 className="text-lg font-semibold text-white">
+              Retrieval Studio
+            </h1>
+          </div>
         </div>
 
         {/* Project Selector */}
