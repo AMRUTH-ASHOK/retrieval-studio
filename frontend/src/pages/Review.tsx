@@ -1,95 +1,153 @@
 import { useState, useEffect } from 'react'
-import { ExternalLink, RefreshCw, ChevronDown, ChevronRight } from 'lucide-react'
-import { buildsApi } from '../services/builds'
-import { evaluationsApi } from '../services/evaluations'
+import { ExternalLink, RefreshCw, ChevronDown, ChevronRight, Clock, CheckCircle, XCircle, PlayCircle } from 'lucide-react'
+import { projectsApi } from '../services/projects'
 import { useProject } from '../context/ProjectContext'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
 import { Badge } from '../components/ui/Badge'
-import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '../components/ui/Table'
-import { BuildJob } from '../types'
+
+type MLflowRun = {
+  run_id: string
+  run_name: string
+  status: string
+  start_time: number
+  end_time: number | null
+  role: string
+  metrics: Record<string, number>
+  params: Record<string, string>
+  tags: Record<string, string>
+}
 
 export default function Review() {
   const { selectedProject, selectedProjectId } = useProject()
-  const [builds, setBuilds] = useState<BuildJob[]>([])
-  const [selectedBuild, setSelectedBuild] = useState<BuildJob | null>(null)
-  const [evalResults, setEvalResults] = useState<any[]>([])
+  const [mlflowRuns, setMlflowRuns] = useState<MLflowRun[]>([])
+  const [selectedRun, setSelectedRun] = useState<MLflowRun | null>(null)
   const [isLoading, setIsLoading] = useState(false)
-  const [isLoadingResults, setIsLoadingResults] = useState(false)
-  const [expandedQuery, setExpandedQuery] = useState<string | null>(null)
+  const [mlflowUrl, setMlflowUrl] = useState<string | null>(null)
+  const [experimentName, setExperimentName] = useState<string | null>(null)
+  const [expandedSections, setExpandedSections] = useState<{
+    metrics: boolean
+    params: boolean
+    tags: boolean
+  }>({
+    metrics: true,
+    params: true,
+    tags: false,
+  })
 
   useEffect(() => {
     if (selectedProjectId) {
-      loadBuilds()
+      loadMLflowData()
     }
   }, [selectedProjectId])
 
-  const loadBuilds = async () => {
+  const loadMLflowData = async () => {
+    if (!selectedProjectId) return
+
     setIsLoading(true)
     try {
-      const buildsData = await buildsApi.list()
-      const projectBuilds = buildsData.filter(
-        (b: BuildJob) => b.project_id === selectedProjectId
-      )
-      setBuilds(projectBuilds)
+      // Load both MLflow URL and runs
+      const [mlflowData, runsData] = await Promise.all([
+        projectsApi.getMLflowExperiment(selectedProjectId),
+        projectsApi.getMLflowRuns(selectedProjectId)
+      ])
+
+      setMlflowUrl(mlflowData.mlflow_url)
+      setExperimentName(mlflowData.experiment_name)
+      setMlflowRuns(runsData.runs)
+
+      // Auto-select first run if available
+      if (runsData.runs.length > 0) {
+        setSelectedRun(runsData.runs[0])
+      }
     } catch (error) {
-      console.error('Failed to load builds:', error)
+      console.error('Failed to load MLflow data:', error)
     } finally {
       setIsLoading(false)
     }
   }
 
-  const loadEvalResults = async (build: BuildJob) => {
-    setIsLoadingResults(true)
-    setSelectedBuild(build)
-    try {
-      const results = await evaluationsApi.getResults(build.run_id)
-      setEvalResults(results)
-    } catch (error) {
-      console.error('Failed to load evaluation results:', error)
-      setEvalResults([])
-    } finally {
-      setIsLoadingResults(false)
+  const getStatusBadge = (status: string) => {
+    const statusMap: Record<string, { variant: 'success' | 'warning' | 'error' | 'info', icon: any }> = {
+      FINISHED: { variant: 'success', icon: CheckCircle },
+      RUNNING: { variant: 'info', icon: PlayCircle },
+      FAILED: { variant: 'error', icon: XCircle },
+      SCHEDULED: { variant: 'warning', icon: Clock },
     }
+
+    const config = statusMap[status] || { variant: 'warning' as const, icon: Clock }
+    const Icon = config.icon
+
+    return (
+      <Badge variant={config.variant}>
+        <Icon className="w-3 h-3 mr-1" />
+        {status}
+      </Badge>
+    )
   }
 
-  const getStateBadge = (state: string) => {
-    const stateMap: Record<string, 'success' | 'warning' | 'error' | 'info'> = {
-      SUCCESS: 'success',
-      RUNNING: 'info',
-      PENDING: 'warning',
-      FAILED: 'error',
+  const getRoleBadge = (role: string) => {
+    const colorMap: Record<string, string> = {
+      build_parent: 'bg-blue-100 text-blue-800',
+      build_strategy: 'bg-green-100 text-green-800',
+      eval_parent: 'bg-purple-100 text-purple-800',
+      eval_strategy: 'bg-pink-100 text-pink-800',
     }
-    return <Badge variant={stateMap[state] || 'default'}>{state}</Badge>
+
+    return (
+      <span className={`px-2 py-1 text-xs font-medium rounded ${colorMap[role] || 'bg-gray-100 text-gray-800'}`}>
+        {role}
+      </span>
+    )
   }
 
-  const formatMetric = (value: number | null | undefined, decimals = 3) => {
-    if (value === null || value === undefined) return '-'
-    return value.toFixed(decimals)
+  const formatDuration = (startTime: number, endTime: number | null) => {
+    if (!endTime) return 'Running...'
+    const durationMs = endTime - startTime
+    const seconds = Math.floor(durationMs / 1000)
+    if (seconds < 60) return `${seconds}s`
+    const minutes = Math.floor(seconds / 60)
+    if (minutes < 60) return `${minutes}m ${seconds % 60}s`
+    const hours = Math.floor(minutes / 60)
+    return `${hours}h ${minutes % 60}m`
   }
 
-  // Group results by strategy
-  const resultsByStrategy = evalResults.reduce((acc: any, result: any) => {
-    const strategy = result.strategy || 'unknown'
-    if (!acc[strategy]) {
-      acc[strategy] = []
-    }
-    acc[strategy].push(result)
-    return acc
-  }, {})
+  const formatTimestamp = (timestamp: number) => {
+    return new Date(timestamp).toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+  }
+
+  const formatMetricValue = (value: number) => {
+    if (value === Math.floor(value)) return value.toString()
+    if (value < 0.001) return value.toExponential(3)
+    if (value < 1) return value.toFixed(4)
+    return value.toFixed(3)
+  }
+
+  const toggleSection = (section: 'metrics' | 'params' | 'tags') => {
+    setExpandedSections(prev => ({
+      ...prev,
+      [section]: !prev[section]
+    }))
+  }
 
   return (
     <div>
       <div className="flex justify-between items-center mb-6">
         <div>
-          <h1 className="text-2xl font-semibold text-databricks-gray-900">Review Results</h1>
+          <h1 className="text-2xl font-semibold text-databricks-gray-900">MLflow Experiment Runs</h1>
           <p className="text-sm text-databricks-gray-600 mt-1">
-            View build and evaluation job results with detailed metrics
+            View all runs, metrics, parameters, and tags for this project
           </p>
         </div>
         <Button
           variant="outline"
-          onClick={loadBuilds}
+          onClick={loadMLflowData}
           icon={<RefreshCw className="w-4 h-4" />}
           disabled={isLoading || !selectedProjectId}
         >
@@ -98,11 +156,11 @@ export default function Review() {
       </div>
 
       {!selectedProjectId && (
-        <div className="mb-6 p-4 bg-yellow-50 border border-yellow-200 rounded-md">
+        <Card className="mb-6 bg-yellow-50 border-yellow-200">
           <p className="text-sm text-yellow-800">
-            Please select a project from the sidebar to view results.
+            Please select a project from the sidebar to view MLflow runs.
           </p>
-        </div>
+        </Card>
       )}
 
       {selectedProject && (
@@ -113,207 +171,291 @@ export default function Review() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Build Runs List */}
-        <Card className="lg:col-span-1">
-          <h2 className="text-lg font-semibold text-databricks-gray-900 mb-4">Build Runs</h2>
-          
-          {isLoading ? (
-            <div className="flex justify-center items-center py-8">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-databricks-blue"></div>
-            </div>
-          ) : builds.length === 0 ? (
-            <div className="text-center py-8">
-              <p className="text-sm text-databricks-gray-600">
-                No build runs yet. Create a build first.
+      {mlflowUrl && experimentName && (
+        <Card className="mb-6 bg-gradient-to-r from-blue-50 to-purple-50 border-2 border-blue-300">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-md font-semibold text-databricks-gray-900 mb-2">
+                📊 MLflow Experiment
+              </h3>
+              <p className="text-sm text-databricks-gray-700 font-mono mb-2">
+                {experimentName}
               </p>
+              <a
+                href={mlflowUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center text-sm text-databricks-blue hover:underline font-medium"
+              >
+                <ExternalLink className="w-4 h-4 mr-1" />
+                Open in MLflow UI
+              </a>
             </div>
-          ) : (
-            <div className="space-y-2 max-h-[600px] overflow-y-auto custom-scrollbar">
-              {builds.map((build) => (
+          </div>
+        </Card>
+      )}
+
+      {isLoading ? (
+        <div className="flex justify-center items-center py-12">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-databricks-blue"></div>
+        </div>
+      ) : mlflowRuns.length === 0 ? (
+        <Card>
+          <div className="text-center py-12">
+            <p className="text-sm text-databricks-gray-600 mb-2">
+              No MLflow runs found for this project.
+            </p>
+            <p className="text-xs text-databricks-gray-500">
+              Run a build or evaluation job to see runs here.
+            </p>
+          </div>
+        </Card>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Runs List */}
+          <Card className="lg:col-span-1">
+            <h2 className="text-lg font-semibold text-databricks-gray-900 mb-4">
+              Runs ({mlflowRuns.length})
+            </h2>
+
+            <div className="space-y-2 max-h-[800px] overflow-y-auto custom-scrollbar">
+              {mlflowRuns.map((run) => (
                 <div
-                  key={build.run_id}
-                  onClick={() => loadEvalResults(build)}
+                  key={run.run_id}
+                  onClick={() => setSelectedRun(run)}
                   className={`p-3 border rounded-md cursor-pointer transition-all ${
-                    selectedBuild?.run_id === build.run_id
-                      ? 'border-databricks-blue bg-blue-50'
+                    selectedRun?.run_id === run.run_id
+                      ? 'border-databricks-blue bg-blue-50 ring-2 ring-databricks-blue'
                       : 'border-databricks-gray-200 hover:border-databricks-gray-300 hover:bg-databricks-gray-50'
                   }`}
                 >
                   <div className="flex items-start justify-between mb-2">
-                    <code className="text-xs font-mono bg-white px-2 py-1 rounded border border-databricks-gray-200">
-                      {build.run_id.substring(0, 12)}...
-                    </code>
-                    {getStateBadge(build.state)}
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-databricks-gray-900 truncate">
+                        {run.run_name}
+                      </p>
+                      <code className="text-xs text-databricks-gray-600 font-mono">
+                        {run.run_id.substring(0, 8)}...
+                      </code>
+                    </div>
+                    {getStatusBadge(run.status)}
                   </div>
-                  <p className="text-xs text-databricks-gray-600">
-                    {new Date(build.created_at).toLocaleString()}
+
+                  <div className="flex items-center gap-2 mb-2">
+                    {getRoleBadge(run.role)}
+                  </div>
+
+                  <div className="flex items-center text-xs text-databricks-gray-600">
+                    <Clock className="w-3 h-3 mr-1" />
+                    {formatDuration(run.start_time, run.end_time)}
+                  </div>
+
+                  <p className="text-xs text-databricks-gray-500 mt-1">
+                    {formatTimestamp(run.start_time)}
                   </p>
-                  {build.config?.data_type && (
-                    <p className="text-xs text-databricks-gray-500 mt-1">
-                      {build.config.data_type}
-                    </p>
-                  )}
                 </div>
               ))}
             </div>
-          )}
-        </Card>
+          </Card>
 
-        {/* Evaluation Results */}
-        <Card className="lg:col-span-2">
-          <h2 className="text-lg font-semibold text-databricks-gray-900 mb-4">
-            Evaluation Results
-            {selectedBuild && (
-              <span className="text-sm font-normal text-databricks-gray-600 ml-2">
-                for {selectedBuild.run_id.substring(0, 12)}...
-              </span>
-            )}
-          </h2>
-
-          {!selectedBuild ? (
-            <div className="text-center py-12">
-              <p className="text-sm text-databricks-gray-600">
-                Select a build run to view evaluation results
-              </p>
-            </div>
-          ) : isLoadingResults ? (
-            <div className="flex justify-center items-center py-12">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-databricks-blue"></div>
-            </div>
-          ) : evalResults.length === 0 ? (
-            <div className="text-center py-12">
-              <p className="text-sm text-databricks-gray-600 mb-4">
-                No evaluation results found for this build.
-              </p>
-              <p className="text-xs text-databricks-gray-500">
-                Run an evaluation job on this build to see metrics here.
-              </p>
-            </div>
-          ) : (
-            <div className="space-y-6">
-              {Object.entries(resultsByStrategy).map(([strategy, results]: [string, any]) => {
-                const strategyResults = results as any[]
-                const avgMetrics = {
-                  recall_at_10: strategyResults.reduce((sum, r) => {
-                    const m = typeof r.metrics === 'string' ? JSON.parse(r.metrics) : r.metrics
-                    return sum + (m.recall_at_10 || 0)
-                  }, 0) / strategyResults.length,
-                  ndcg_at_10: strategyResults.reduce((sum, r) => {
-                    const m = typeof r.metrics === 'string' ? JSON.parse(r.metrics) : r.metrics
-                    return sum + (m.ndcg_at_10 || 0)
-                  }, 0) / strategyResults.length,
-                  latency_ms: strategyResults.reduce((sum, r) => {
-                    const m = typeof r.metrics === 'string' ? JSON.parse(r.metrics) : r.metrics
-                    return sum + (m.retrieval_latency_ms || 0)
-                  }, 0) / strategyResults.length,
-                }
-
-                return (
-                  <div key={strategy} className="border border-databricks-gray-200 rounded-lg p-4">
-                    <div className="flex items-center justify-between mb-3">
-                      <h3 className="text-md font-semibold text-databricks-gray-900">
-                        {strategy}
-                      </h3>
-                      <Badge variant="default">{strategyResults.length} queries</Badge>
-                    </div>
-
-                    <div className="grid grid-cols-3 gap-4 mb-4">
-                      <div className="bg-databricks-gray-50 p-3 rounded">
-                        <p className="text-xs text-databricks-gray-600 mb-1">Avg Recall@10</p>
-                        <p className="text-lg font-semibold text-databricks-gray-900">
-                          {formatMetric(avgMetrics.recall_at_10)}
-                        </p>
+          {/* Run Details */}
+          <Card className="lg:col-span-2">
+            {!selectedRun ? (
+              <div className="text-center py-12">
+                <p className="text-sm text-databricks-gray-600">
+                  Select a run to view details
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-6">
+                {/* Run Header */}
+                <div>
+                  <div className="flex items-start justify-between mb-4">
+                    <div>
+                      <h2 className="text-xl font-semibold text-databricks-gray-900 mb-2">
+                        {selectedRun.run_name}
+                      </h2>
+                      <div className="flex items-center gap-3 text-sm text-databricks-gray-600">
+                        <code className="bg-databricks-gray-100 px-2 py-1 rounded font-mono">
+                          {selectedRun.run_id}
+                        </code>
+                        {getStatusBadge(selectedRun.status)}
+                        {getRoleBadge(selectedRun.role)}
                       </div>
-                      <div className="bg-databricks-gray-50 p-3 rounded">
-                        <p className="text-xs text-databricks-gray-600 mb-1">Avg NDCG@10</p>
-                        <p className="text-lg font-semibold text-databricks-gray-900">
-                          {formatMetric(avgMetrics.ndcg_at_10)}
-                        </p>
-                      </div>
-                      <div className="bg-databricks-gray-50 p-3 rounded">
-                        <p className="text-xs text-databricks-gray-600 mb-1">Avg Latency</p>
-                        <p className="text-lg font-semibold text-databricks-gray-900">
-                          {formatMetric(avgMetrics.latency_ms, 0)}ms
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="border-t border-databricks-gray-200 pt-3">
-                      <button
-                        onClick={() => setExpandedQuery(expandedQuery === strategy ? null : strategy)}
-                        className="flex items-center text-sm text-databricks-blue hover:underline"
-                      >
-                        {expandedQuery === strategy ? (
-                          <ChevronDown className="w-4 h-4 mr-1" />
-                        ) : (
-                          <ChevronRight className="w-4 h-4 mr-1" />
-                        )}
-                        View per-query metrics
-                      </button>
-
-                      {expandedQuery === strategy && (
-                        <div className="mt-3 max-h-[300px] overflow-y-auto custom-scrollbar">
-                          <Table>
-                            <TableHeader>
-                              <TableRow>
-                                <TableHead>Query</TableHead>
-                                <TableHead>Recall@10</TableHead>
-                                <TableHead>NDCG@10</TableHead>
-                                <TableHead>Latency (ms)</TableHead>
-                              </TableRow>
-                            </TableHeader>
-                            <TableBody>
-                              {strategyResults.map((result, idx) => {
-                                const metrics = typeof result.metrics === 'string' 
-                                  ? JSON.parse(result.metrics) 
-                                  : result.metrics
-                                return (
-                                  <TableRow key={idx}>
-                                    <TableCell className="max-w-xs truncate">
-                                      {result.query_text || '-'}
-                                    </TableCell>
-                                    <TableCell>{formatMetric(metrics.recall_at_10)}</TableCell>
-                                    <TableCell>{formatMetric(metrics.ndcg_at_10)}</TableCell>
-                                    <TableCell>{formatMetric(metrics.retrieval_latency_ms, 0)}</TableCell>
-                                  </TableRow>
-                                )
-                              })}
-                            </TableBody>
-                          </Table>
-                        </div>
-                      )}
                     </div>
                   </div>
-                )
-              })}
-            </div>
-          )}
-        </Card>
-      </div>
 
-      {builds.length > 0 && (
+                  <div className="grid grid-cols-2 gap-4 p-4 bg-databricks-gray-50 rounded-lg">
+                    <div>
+                      <p className="text-xs font-medium text-databricks-gray-500 uppercase mb-1">Started</p>
+                      <p className="text-sm text-databricks-gray-900">{formatTimestamp(selectedRun.start_time)}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-medium text-databricks-gray-500 uppercase mb-1">Duration</p>
+                      <p className="text-sm text-databricks-gray-900">
+                        {formatDuration(selectedRun.start_time, selectedRun.end_time)}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Metrics Section */}
+                {Object.keys(selectedRun.metrics).length > 0 && (
+                  <div className="border border-databricks-gray-200 rounded-lg">
+                    <button
+                      onClick={() => toggleSection('metrics')}
+                      className="w-full px-4 py-3 flex items-center justify-between hover:bg-databricks-gray-50 transition-colors"
+                    >
+                      <h3 className="text-md font-semibold text-databricks-gray-900">
+                        📈 Metrics ({Object.keys(selectedRun.metrics).length})
+                      </h3>
+                      {expandedSections.metrics ? (
+                        <ChevronDown className="w-5 h-5 text-databricks-gray-600" />
+                      ) : (
+                        <ChevronRight className="w-5 h-5 text-databricks-gray-600" />
+                      )}
+                    </button>
+
+                    {expandedSections.metrics && (
+                      <div className="px-4 pb-4 max-h-[400px] overflow-y-auto">
+                        <div className="grid grid-cols-2 gap-3">
+                          {Object.entries(selectedRun.metrics)
+                            .sort(([a], [b]) => a.localeCompare(b))
+                            .map(([key, value]) => (
+                              <div key={key} className="p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                                <p className="text-xs text-databricks-gray-600 mb-1 font-medium">{key}</p>
+                                <p className="text-lg font-semibold text-databricks-gray-900">
+                                  {formatMetricValue(value)}
+                                </p>
+                              </div>
+                            ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Parameters Section */}
+                {Object.keys(selectedRun.params).length > 0 && (
+                  <div className="border border-databricks-gray-200 rounded-lg">
+                    <button
+                      onClick={() => toggleSection('params')}
+                      className="w-full px-4 py-3 flex items-center justify-between hover:bg-databricks-gray-50 transition-colors"
+                    >
+                      <h3 className="text-md font-semibold text-databricks-gray-900">
+                        ⚙️ Parameters ({Object.keys(selectedRun.params).length})
+                      </h3>
+                      {expandedSections.params ? (
+                        <ChevronDown className="w-5 h-5 text-databricks-gray-600" />
+                      ) : (
+                        <ChevronRight className="w-5 h-5 text-databricks-gray-600" />
+                      )}
+                    </button>
+
+                    {expandedSections.params && (
+                      <div className="px-4 pb-4 max-h-[400px] overflow-y-auto">
+                        <div className="space-y-2">
+                          {Object.entries(selectedRun.params)
+                            .sort(([a], [b]) => a.localeCompare(b))
+                            .map(([key, value]) => (
+                              <div key={key} className="flex items-start py-2 border-b border-databricks-gray-100 last:border-0">
+                                <span className="text-sm font-medium text-databricks-gray-700 min-w-[200px]">
+                                  {key}
+                                </span>
+                                <span className="text-sm text-databricks-gray-900 font-mono break-all">
+                                  {value}
+                                </span>
+                              </div>
+                            ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Tags Section */}
+                {Object.keys(selectedRun.tags).length > 0 && (
+                  <div className="border border-databricks-gray-200 rounded-lg">
+                    <button
+                      onClick={() => toggleSection('tags')}
+                      className="w-full px-4 py-3 flex items-center justify-between hover:bg-databricks-gray-50 transition-colors"
+                    >
+                      <h3 className="text-md font-semibold text-databricks-gray-900">
+                        🏷️ Tags ({Object.keys(selectedRun.tags).length})
+                      </h3>
+                      {expandedSections.tags ? (
+                        <ChevronDown className="w-5 h-5 text-databricks-gray-600" />
+                      ) : (
+                        <ChevronRight className="w-5 h-5 text-databricks-gray-600" />
+                      )}
+                    </button>
+
+                    {expandedSections.tags && (
+                      <div className="px-4 pb-4 max-h-[400px] overflow-y-auto">
+                        <div className="space-y-2">
+                          {Object.entries(selectedRun.tags)
+                            .sort(([a], [b]) => a.localeCompare(b))
+                            .map(([key, value]) => (
+                              <div key={key} className="flex items-start py-2 border-b border-databricks-gray-100 last:border-0">
+                                <span className="text-sm font-medium text-databricks-gray-700 min-w-[200px]">
+                                  {key}
+                                </span>
+                                <span className="text-sm text-databricks-gray-600 break-all">
+                                  {value}
+                                </span>
+                              </div>
+                            ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Empty State */}
+                {Object.keys(selectedRun.metrics).length === 0 &&
+                 Object.keys(selectedRun.params).length === 0 &&
+                 Object.keys(selectedRun.tags).length === 0 && (
+                  <div className="text-center py-8">
+                    <p className="text-sm text-databricks-gray-600">
+                      No metrics, parameters, or tags recorded for this run.
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
+          </Card>
+        </div>
+      )}
+
+      {/* Info Section */}
+      {mlflowRuns.length > 0 && (
         <Card className="mt-6 bg-databricks-gray-50">
           <h3 className="text-sm font-semibold text-databricks-gray-900 mb-3">
-            About Results
+            💡 About MLflow Runs
           </h3>
           <ul className="space-y-2 text-sm text-databricks-gray-700">
             <li className="flex items-start">
               <span className="mr-2">•</span>
               <span>
-                Results are fetched from the eval_results table in your Delta Lake catalog
+                <strong>Build runs:</strong> Parent runs create indexes and embed documents. Strategy runs test different chunking approaches.
               </span>
             </li>
             <li className="flex items-start">
               <span className="mr-2">•</span>
               <span>
-                Metrics shown: Recall@10, NDCG@10, and retrieval latency per query
+                <strong>Evaluation runs:</strong> Parent runs coordinate evaluation. Strategy runs compute metrics like Recall@K and NDCG@K.
               </span>
             </li>
             <li className="flex items-start">
               <span className="mr-2">•</span>
               <span>
-                All evaluation runs are tracked in MLflow - visit the MLflow UI in Databricks for detailed logs
+                <strong>Metrics:</strong> Track retrieval quality (recall, NDCG, precision) and performance (latency, throughput).
+              </span>
+            </li>
+            <li className="flex items-start">
+              <span className="mr-2">•</span>
+              <span>
+                <strong>Parameters:</strong> Capture configuration like chunking strategy, embedding model, top-k values, and data sources.
               </span>
             </li>
           </ul>

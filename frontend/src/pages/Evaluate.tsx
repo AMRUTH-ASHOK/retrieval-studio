@@ -21,7 +21,6 @@ export default function Evaluate() {
   const [datasetPath, setDatasetPath] = useState('')
   const [topK, setTopK] = useState(10)
   const [autoGenerateQueries, setAutoGenerateQueries] = useState(false)
-  const [corpusTable, setCorpusTable] = useState('')
   const [numQueries, setNumQueries] = useState(50)
   const [queryStyle, setQueryStyle] = useState('keyword')
   const [compareQueryTypes, setCompareQueryTypes] = useState(false)
@@ -36,12 +35,14 @@ export default function Evaluate() {
     start_time: number | null
   } | null>(null)
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  const statusCardRef = useRef<HTMLDivElement | null>(null)
+  const [evaluationMode, setEvaluationMode] = useState<'existing' | 'auto-generate'>('existing')
 
   useEffect(() => {
     if (selectedProjectId) {
       loadLatestBuild()
     }
-    
+
     // Cleanup polling on unmount
     return () => {
       if (pollingIntervalRef.current) {
@@ -49,6 +50,25 @@ export default function Evaluate() {
       }
     }
   }, [selectedProjectId])
+
+  // Debug: Log state changes
+  useEffect(() => {
+    console.log('[DEBUG] State changed:', {
+      submittedRunId,
+      jobStatus,
+      hasJobStatus: !!jobStatus,
+      hasSubmittedRunId: !!submittedRunId,
+      shouldShowCard: !!(jobStatus && submittedRunId)
+    })
+  }, [submittedRunId, jobStatus])
+
+  // Auto-scroll to status card when it appears
+  useEffect(() => {
+    if (jobStatus && submittedRunId && statusCardRef.current) {
+      console.log('[DEBUG] Scrolling to status card')
+      statusCardRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+  }, [jobStatus, submittedRunId])
 
   useEffect(() => {
     // Start polling when a run is submitted
@@ -66,25 +86,42 @@ export default function Evaluate() {
   }, [submittedRunId])
 
   const pollJobStatus = async () => {
-    if (!submittedRunId) return
-    
+    if (!submittedRunId) {
+      console.log('[DEBUG POLL] No submittedRunId, skipping poll')
+      return
+    }
+
+    console.log('[DEBUG POLL] Polling status for:', submittedRunId)
+
     try {
       const status = await evaluationsApi.getStatus(submittedRunId)
-      setJobStatus({
+      console.log('[DEBUG POLL] Got status:', status)
+
+      const newStatus = {
         state: status.state,
         job_url: status.job_url,
         start_time: status.start_time,
-      })
-      
+      }
+      setJobStatus(newStatus)
+      console.log('[DEBUG POLL] Updated jobStatus to:', newStatus)
+
       // Stop polling if job completed or failed
       if (status.state === 'SUCCESS' || status.state === 'FAILED') {
+        console.log('[DEBUG POLL] Job completed, stopping polling')
         if (pollingIntervalRef.current) {
           clearInterval(pollingIntervalRef.current)
           pollingIntervalRef.current = null
         }
+
+        // If job succeeded, redirect to review page after a short delay
+        if (status.state === 'SUCCESS') {
+          setTimeout(() => {
+            navigate('/review')
+          }, 2000)
+        }
       }
     } catch (error) {
-      console.error('Failed to poll job status:', error)
+      console.error('[DEBUG POLL] Failed to poll job status:', error)
     }
   }
 
@@ -137,15 +174,15 @@ export default function Evaluate() {
       return
     }
 
-    if (!autoGenerateQueries && !datasetPath) {
-      setError('Please provide a queries dataset or enable auto-generation')
+    const isAutoGenerate = evaluationMode === 'auto-generate'
+
+    if (!isAutoGenerate && !datasetPath) {
+      setError('Please provide a queries dataset')
       return
     }
 
-    if (autoGenerateQueries && !corpusTable) {
-      setError('Please provide a corpus table for query generation')
-      return
-    }
+    // Corpus table will be auto-extracted from build results by the backend
+    // No need to validate here
 
     setIsSubmitting(true)
     setError('')
@@ -154,12 +191,12 @@ export default function Evaluate() {
       const submitData: any = {
         run_id: selectedRunId,
         top_k: topK,
-        auto_generate_queries: autoGenerateQueries,
+        auto_generate_queries: isAutoGenerate,
         compare_query_types: compareQueryTypes,
       }
 
-      if (autoGenerateQueries) {
-        submitData.corpus_table = corpusTable
+      if (isAutoGenerate) {
+        // Don't send corpus_table - let backend auto-extract it from build results
         submitData.num_queries = numQueries
         submitData.query_style = queryStyle
       } else {
@@ -174,28 +211,42 @@ export default function Evaluate() {
       const result = await evaluationsApi.create(submitData)
 
       console.log('[DEBUG] Evaluation submitted:', result)
+      console.log('[DEBUG] Setting submittedRunId to:', result.run_id)
 
       // Store run ID and initial status
       setSubmittedRunId(result.run_id)
-      setJobStatus({
-        state: result.state,
-        job_url: result.job_url || null,
-        start_time: new Date(result.created_at).getTime(),
-      })
 
-      console.log('[DEBUG] Status set:', {
-        submittedRunId: result.run_id,
-        jobStatus: {
-          state: result.state,
-          job_url: result.job_url,
-          start_time: new Date(result.created_at).getTime()
+      // Fetch initial status with full details (same pattern as Build.tsx)
+      let finalStatus
+      try {
+        console.log('[DEBUG] Fetching full status for:', result.run_id)
+        const status = await evaluationsApi.getStatus(result.run_id)
+        console.log('[DEBUG] Got status from API:', status)
+        finalStatus = {
+          state: status.state,
+          job_url: status.job_url,
+          start_time: status.start_time,
         }
-      })
+        setJobStatus(finalStatus)
+        console.log('[DEBUG] Set jobStatus to:', finalStatus)
+      } catch (error) {
+        // Fallback to basic info if status fetch fails
+        console.log('[DEBUG] Status fetch failed, using fallback:', error)
+        finalStatus = {
+          state: result.state,
+          job_url: result.job_url || null,
+          start_time: new Date(result.created_at).getTime(),
+        }
+        setJobStatus(finalStatus)
+        console.log('[DEBUG] Set jobStatus to (fallback):', finalStatus)
+      }
+
+      console.log('[DEBUG] About to reset form and set isSubmitting to false')
 
       // Reset form (but keep showing status)
       setDatasetPath('')
       setCorpusTable('')
-      setIsSubmitting(false)  // ← FIX: Reset submitting state
+      setIsSubmitting(false)
     } catch (error: any) {
       console.error('Failed to submit evaluation:', error)
       setError(error?.response?.data?.detail || 'Failed to submit evaluation job')
@@ -244,63 +295,6 @@ export default function Evaluate() {
             </div>
           )}
 
-      {jobStatus && submittedRunId && (
-        <Card className="mb-6">
-          <CardContent className="p-6">
-            <div className="flex items-start justify-between mb-4">
-              <div>
-                <h2 className="text-lg font-semibold text-databricks-gray-900 mb-2">
-                  Evaluation Job Status
-                </h2>
-                <p className="text-sm text-databricks-gray-600 font-mono">
-                  Run ID: {submittedRunId.substring(0, 12)}...
-                </p>
-              </div>
-              <Badge
-                variant={
-                  jobStatus.state === 'SUCCESS'
-                    ? 'success'
-                    : jobStatus.state === 'FAILED'
-                    ? 'error'
-                    : jobStatus.state === 'RUNNING'
-                    ? 'info'
-                    : 'warning'
-                }
-              >
-                {jobStatus.state}
-              </Badge>
-            </div>
-
-            {jobStatus.job_url && (
-              <div className="mb-4">
-                <a
-                  href={jobStatus.job_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center text-sm text-databricks-blue hover:underline"
-                >
-                  <ExternalLink className="w-4 h-4 mr-1" />
-                  View Job in Databricks
-                </a>
-              </div>
-            )}
-
-            <div className="flex items-center text-sm text-databricks-gray-600">
-              <Clock className="w-4 h-4 mr-2" />
-              <span>Time since execution: {formatTimeSince(jobStatus.start_time)}</span>
-            </div>
-
-            {jobStatus.state === 'SUCCESS' && (
-              <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded-md">
-                <p className="text-sm text-green-800">
-                  Evaluation job completed successfully!
-                </p>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      )}
-
       {/* Submit Evaluation Form */}
       <Card>
         <h2 className="text-lg font-semibold text-databricks-gray-900 mb-6">
@@ -326,117 +320,140 @@ export default function Evaluate() {
             </div>
           )}
 
-          {/* Option 1: Upload Golden Dataset */}
-          <div className="border border-gray-200 rounded-lg p-4">
-            <h3 className="text-md font-semibold text-databricks-gray-900 mb-3">
-              Option 1: Upload Golden Dataset
-            </h3>
-            <p className="text-sm text-databricks-gray-600 mb-4">
-              Use a pre-existing dataset with query_text and optional expected_chunks columns
-            </p>
+          {/* Evaluation Mode Selection */}
+          <div className="space-y-6">
+            <div>
+              <label className="block text-sm font-medium text-databricks-gray-900 mb-3">
+                Select Evaluation Mode
+              </label>
+              <div className="space-y-4">
+                <label className="flex items-start p-5 border-2 rounded-lg cursor-pointer hover:bg-gray-50 transition-all shadow-sm"
+                  style={{
+                    borderColor: evaluationMode === 'existing' ? '#2196F3' : '#E5E7EB',
+                    backgroundColor: evaluationMode === 'existing' ? '#F0F9FF' : 'white'
+                  }}>
+                  <input
+                    type="radio"
+                    name="evaluationMode"
+                    checked={evaluationMode === 'existing'}
+                    onChange={() => setEvaluationMode('existing')}
+                    className="mt-1 w-4 h-4 text-databricks-blue border-gray-300 focus:ring-databricks-blue"
+                  />
+                  <div className="ml-3 flex-1">
+                    <div className="font-semibold text-databricks-gray-900 text-base">
+                      Option 1: Use Existing Queries Dataset
+                    </div>
+                    <p className="text-sm text-databricks-gray-600 mt-1">
+                      Provide a pre-existing dataset with query_text and optional expected_chunks columns
+                    </p>
+                  </div>
+                </label>
 
-            <div className="space-y-4">
-              <Select
-                label="Dataset Type"
-                value={datasetType}
-                onChange={(e) => {
-                  setDatasetType(e.target.value as DatasetType)
-                  setDatasetPath('')
-                }}
-                options={[
-                  { value: 'delta_table', label: 'Delta Table' },
-                  { value: 'csv', label: 'CSV File' },
-                  { value: 'excel', label: 'Excel File' },
-                ]}
-                helperText="Select the type of golden dataset"
-              />
+                {/* Visual Separator */}
+                <div className="flex items-center gap-3">
+                  <div className="flex-1 border-t border-gray-300"></div>
+                  <span className="text-xs font-medium text-gray-500 uppercase tracking-wider">OR</span>
+                  <div className="flex-1 border-t border-gray-300"></div>
+                </div>
 
-              <Input
-                label={
-                  datasetType === 'delta_table'
-                    ? 'Delta Table Path'
-                    : datasetType === 'csv'
-                    ? 'CSV File Path'
-                    : 'Excel File Path'
-                }
-                value={datasetPath}
-                onChange={(e) => {
-                  setDatasetPath(e.target.value)
-                  if (e.target.value) {
-                    setAutoGenerateQueries(false)
-                    setCorpusTable('')
-                  }
-                }}
-                placeholder={
-                  datasetType === 'delta_table'
-                    ? 'e.g., catalog.schema.queries_table'
-                    : datasetType === 'csv'
-                    ? 'e.g., /path/to/file.csv'
-                    : 'e.g., /path/to/file.xlsx'
-                }
-                helperText={
-                  datasetType === 'delta_table'
-                    ? 'Fully qualified table name (catalog.schema.table)'
-                    : 'Path to the file in Databricks workspace or DBFS'
-                }
-              />
+                <label className="flex items-start p-5 border-2 rounded-lg cursor-pointer hover:bg-gray-50 transition-all shadow-sm"
+                  style={{
+                    borderColor: evaluationMode === 'auto-generate' ? '#2196F3' : '#E5E7EB',
+                    backgroundColor: evaluationMode === 'auto-generate' ? '#F0F9FF' : 'white'
+                  }}>
+                  <input
+                    type="radio"
+                    name="evaluationMode"
+                    checked={evaluationMode === 'auto-generate'}
+                    onChange={() => setEvaluationMode('auto-generate')}
+                    className="mt-1 w-4 h-4 text-databricks-blue border-gray-300 focus:ring-databricks-blue"
+                  />
+                  <div className="ml-3 flex-1">
+                    <div className="font-semibold text-databricks-gray-900 text-base">
+                      Option 2: Auto-Generate Queries
+                    </div>
+                    <p className="text-sm text-databricks-gray-600 mt-1">
+                      Automatically generate synthetic evaluation queries from your corpus using LLM (no dataset required)
+                    </p>
+                  </div>
+                </label>
+              </div>
             </div>
-          </div>
 
-          {/* Divider */}
-          <div className="flex items-center">
-            <div className="flex-grow border-t border-gray-300"></div>
-            <span className="px-4 text-sm text-databricks-gray-500 font-medium">OR</span>
-            <div className="flex-grow border-t border-gray-300"></div>
-          </div>
+            {/* Configuration Section with Clear Heading */}
+            <div className="border-t-4 border-databricks-blue pt-6">
+              <h3 className="text-md font-semibold text-databricks-gray-900 mb-4">
+                {evaluationMode === 'existing' ? '📄 Dataset Configuration' : '🤖 Auto-Generation Configuration'}
+              </h3>
 
-          {/* Option 2: Auto-Generate Queries */}
-          <div className="border border-gray-200 rounded-lg p-4">
-            <h3 className="text-md font-semibold text-databricks-gray-900 mb-3">
-              Option 2: Auto-Generate Queries
-            </h3>
-            <p className="text-sm text-databricks-gray-600 mb-4">
-              Generate synthetic evaluation queries from your document corpus using LLM
-            </p>
-
-            <div className="space-y-4">
-              <Input
-                label="Corpus Table"
-                value={corpusTable}
-                onChange={(e) => {
-                  setCorpusTable(e.target.value)
-                  if (e.target.value) {
-                    setAutoGenerateQueries(true)
-                    setDatasetPath('')
-                  } else {
-                    setAutoGenerateQueries(false)
-                  }
-                }}
-                placeholder="e.g., catalog.schema.documents"
-                helperText="Fully qualified table name containing your documents (must have 'text' column)"
-              />
-
-              {corpusTable && (
-                <div className="grid grid-cols-2 gap-4">
-                  <Input
-                    label="Number of Queries"
-                    type="number"
-                    value={numQueries.toString()}
-                    onChange={(e) => setNumQueries(parseInt(e.target.value) || 50)}
-                    placeholder="50"
-                    helperText="Number of queries to generate"
-                  />
+              {/* Option 1: Existing Dataset Fields */}
+              {evaluationMode === 'existing' && (
+                <div className="space-y-4 p-5 bg-blue-50 border border-blue-200 rounded-lg">
                   <Select
-                    label="Query Style"
-                    value={queryStyle}
-                    onChange={(e) => setQueryStyle(e.target.value)}
+                    label="Dataset Type"
+                    value={datasetType}
+                    onChange={(e) => {
+                      setDatasetType(e.target.value as DatasetType)
+                      setDatasetPath('')
+                    }}
                     options={[
-                      { value: 'keyword', label: 'Keyword (2-5 words)' },
-                      { value: 'natural', label: 'Natural (full questions)' },
-                      { value: 'mixed', label: 'Mixed' },
+                      { value: 'delta_table', label: 'Delta Table' },
+                      { value: 'csv', label: 'CSV File' },
+                      { value: 'excel', label: 'Excel File' },
                     ]}
-                    helperText="Style of queries to generate"
+                    helperText="Select the type of golden dataset"
                   />
+
+                  <Input
+                    label={
+                      datasetType === 'delta_table'
+                        ? 'Delta Table Path'
+                        : datasetType === 'csv'
+                        ? 'CSV File Path'
+                        : 'Excel File Path'
+                    }
+                    value={datasetPath}
+                    onChange={(e) => setDatasetPath(e.target.value)}
+                    placeholder={
+                      datasetType === 'delta_table'
+                        ? 'e.g., catalog.schema.queries_table'
+                        : datasetType === 'csv'
+                        ? 'e.g., /path/to/file.csv'
+                        : 'e.g., /path/to/file.xlsx'
+                    }
+                    helperText={
+                      datasetType === 'delta_table'
+                        ? 'Fully qualified table name (catalog.schema.table)'
+                        : 'Path to the file in Databricks workspace or DBFS'
+                    }
+                  />
+                </div>
+              )}
+
+              {/* Option 2: Auto-Generate Fields */}
+              {evaluationMode === 'auto-generate' && (
+                <div className="space-y-4 p-5 bg-green-50 border border-green-200 rounded-lg">
+                  <div className="grid grid-cols-2 gap-4">
+                    <Input
+                      label="Number of Queries"
+                      type="number"
+                      value={numQueries.toString()}
+                      onChange={(e) => setNumQueries(parseInt(e.target.value) || 50)}
+                      placeholder="50"
+                      helperText="Number of queries to generate"
+                    />
+                    <Select
+                      label="Query Style"
+                      value={queryStyle}
+                      onChange={(e) => setQueryStyle(e.target.value)}
+                      options={[
+                        { value: 'keyword', label: 'Keyword (2-5 words)' },
+                        { value: 'natural', label: 'Natural (full questions)' },
+                        { value: 'mixed', label: 'Mixed' },
+                      ]}
+                      helperText="Style of queries to generate"
+                    />
+                  </div>
                 </div>
               )}
             </div>
@@ -496,8 +513,7 @@ export default function Evaluate() {
                 !selectedProjectId ||
                 !selectedRunId ||
                 isSubmitting ||
-                (!autoGenerateQueries && !datasetPath) ||
-                (autoGenerateQueries && !corpusTable)
+                (evaluationMode === 'existing' && !datasetPath)
               }
               icon={<PlayCircle className="w-4 h-4" />}
               className="w-full"
@@ -525,7 +541,7 @@ export default function Evaluate() {
               <li className="flex items-start">
                 <span className="mr-2">2.</span>
                 <span>
-                  <strong>Auto-Generate Queries:</strong> Generate synthetic queries from your corpus table using LLM. Specify corpus table, number of queries, and query style. No manual dataset needed.
+                  <strong>Auto-Generate Queries:</strong> Generate synthetic queries from your corpus using LLM. Specify number of queries and query style. No manual dataset needed.
                 </span>
               </li>
             </ul>
@@ -568,6 +584,68 @@ export default function Evaluate() {
           </div>
         </div>
       </Card>
+
+      {/* Job Status Block - Below the form */}
+      {console.log('[DEBUG RENDER] Checking status card condition:', { jobStatus, submittedRunId, willRender: !!(jobStatus && submittedRunId) })}
+
+      {jobStatus && submittedRunId && (
+        <div ref={statusCardRef}>
+          <Card className="mt-6 border-4 border-blue-500 shadow-xl bg-blue-50">
+            <CardContent className="p-6">
+              <div className="flex items-start justify-between mb-4">
+                <div>
+                  <h2 className="text-lg font-semibold text-databricks-gray-900 mb-2">
+                    🎯 Evaluation Job Status
+                  </h2>
+                  <p className="text-sm text-databricks-gray-600 font-mono">
+                    Run ID: {submittedRunId.substring(0, 12)}...
+                  </p>
+                </div>
+                <Badge
+                  variant={
+                    jobStatus.state === 'SUCCESS'
+                      ? 'success'
+                      : jobStatus.state === 'FAILED'
+                      ? 'error'
+                      : jobStatus.state === 'RUNNING'
+                      ? 'info'
+                      : 'warning'
+                  }
+                >
+                  {jobStatus.state}
+                </Badge>
+              </div>
+
+              {jobStatus.job_url && (
+                <div className="mb-4">
+                  <a
+                    href={jobStatus.job_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center text-sm text-databricks-blue hover:underline"
+                  >
+                    <ExternalLink className="w-4 h-4 mr-1" />
+                    View Job in Databricks
+                  </a>
+                </div>
+              )}
+
+              <div className="flex items-center text-sm text-databricks-gray-600">
+                <Clock className="w-4 h-4 mr-2" />
+                <span>Time since execution: {formatTimeSince(jobStatus.start_time)}</span>
+              </div>
+
+              {jobStatus.state === 'SUCCESS' && (
+                <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded-md">
+                  <p className="text-sm text-green-800">
+                    Evaluation job completed successfully! Redirecting to Review page...
+                  </p>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      )}
         </>
       )}
     </div>

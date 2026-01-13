@@ -37,24 +37,60 @@ async def create_evaluation(
         
         # Validate required parameters based on mode
         if auto_generate:
-            if not eval_request.corpus_table:
-                raise HTTPException(status_code=400, detail="corpus_table is required when auto_generate_queries is true")
+            # ALWAYS extract corpus_table directly from build results
+            from utils.jobs import get_job_run_output
+            try:
+                # Get build job output to extract chunks_table
+                build_job_run_id = build_run.get("job_run_id")
+                if not build_job_run_id:
+                    raise HTTPException(status_code=400, detail="Build job_run_id not found. Cannot auto-extract corpus table.")
+
+                build_output = get_job_run_output(w, build_job_run_id)
+                if not build_output or "results" not in build_output:
+                    raise HTTPException(status_code=400, detail="Build results not found.")
+
+                # Extract the nested results from notebook output
+                # build_output["results"] contains the notebook JSON output
+                # which itself has a "results" field with strategy outputs
+                notebook_results = build_output.get("results", {})
+                strategy_results = notebook_results.get("results", {}) if isinstance(notebook_results, dict) else {}
+
+                if not strategy_results:
+                    raise HTTPException(status_code=400, detail="Build strategy results not found.")
+
+                # Find first available chunks_table (prefer baseline, then semantic, then structured)
+                strategies = ['baseline', 'semantic', 'structured']
+                corpus_table = None
+
+                for strategy in strategies:
+                    if strategy in strategy_results and isinstance(strategy_results[strategy], dict):
+                        corpus_table = strategy_results[strategy].get("chunks_table")
+                        if corpus_table:
+                            break
+
+                # If no preferred strategy found, use first available
+                if not corpus_table:
+                    for strategy, result in strategy_results.items():
+                        if isinstance(result, dict) and result.get("chunks_table"):
+                            corpus_table = result["chunks_table"]
+                            break
+
+                if not corpus_table:
+                    raise HTTPException(status_code=400, detail="No chunks_table found in build results.")
+
+                # Set the auto-extracted corpus_table
+                eval_request.corpus_table = corpus_table
+
+            except Exception as e:
+                if isinstance(e, HTTPException):
+                    raise
+                raise HTTPException(status_code=400, detail=f"Failed to auto-extract corpus table from build results: {str(e)}")
         else:
             if not eval_request.queries_table:
                 raise HTTPException(status_code=400, detail="queries_table is required when auto_generate_queries is false")
         
-        # Determine which notebook to use based on features
-        # Use advanced notebook if any advanced features are enabled
-        use_advanced_notebook = (
-            auto_generate or
-            eval_request.compare_query_types or
-            eval_request.judge_model_endpoint
-        )
-
+        # Use the unified eval_notebook (now includes all features)
         notebook_path = settings.EVAL_NOTEBOOK_PATH
-        if use_advanced_notebook:
-            # Replace eval_notebook with eval_notebook_advanced
-            notebook_path = notebook_path.replace("eval_notebook", "eval_notebook_advanced")
 
         # Submit the evaluation job
         job_run_id = submit_eval_job(
@@ -187,18 +223,54 @@ async def get_evaluation_results(run_id: str, sql_connector=Depends(get_sql_conn
     """Get evaluation results for a run"""
     try:
         from utils.query_builder import escape_identifier, sanitize_string
-        
+
         # Query evaluation results using parameterized query
         run_id_safe = sanitize_string(run_id)
-        
+
         query = f"""
             SELECT * FROM {escape_identifier(settings.CATALOG)}.raw.rs_eval_results
             WHERE build_run_id = ?
             ORDER BY created_at DESC
         """
-        
+
         results = sql_connector.execute(query, [run_id_safe])
         return results
-        
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/build/{build_run_id}", response_model=List[EvaluationResponse])
+async def get_evaluations_by_build(build_run_id: str, w=Depends(get_workspace_client), sql_connector=Depends(get_sql_connector)):
+    """Get all evaluations for a specific build run"""
+    try:
+        from utils.postgres_state import get_evaluations_by_build
+
+        evaluations = get_evaluations_by_build(build_run_id)
+
+        # Transform to EvaluationResponse format
+        transformed_evals = []
+        for eval_data in evaluations:
+            job_run_id = eval_data.get("job_run_id")
+            job_url = None
+
+            # Generate job URL if job_run_id exists
+            if job_run_id:
+                try:
+                    job_url = get_job_url(w, job_run_id)
+                except Exception:
+                    pass  # If URL generation fails, continue without it
+
+            transformed_evals.append({
+                "eval_id": eval_data.get("eval_id"),
+                "run_id": eval_data.get("eval_id"),  # Frontend expects run_id
+                "state": eval_data.get("state", "UNKNOWN"),
+                "job_id": str(job_run_id) if job_run_id else None,
+                "job_url": job_url,
+                "created_at": eval_data.get("created_at"),
+                "updated_at": eval_data.get("updated_at"),
+            })
+
+        return transformed_evals
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

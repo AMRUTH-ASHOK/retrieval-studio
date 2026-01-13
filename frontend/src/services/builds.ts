@@ -27,4 +27,21 @@ export const buildsApi = {
     const response = await api.get(`/builds/${runId}/status`)
     return response.data
   },
+
+  getResults: async (runId: string): Promise<{
+    run_id: string
+    results: {
+      [strategy: string]: {
+        chunks_table: string
+        index_name: string
+        chunk_count: number
+        processing_time_seconds: number
+      }
+    } | null
+    status: string
+    message?: string
+  }> => {
+    const response = await api.get(`/builds/${runId}/results`)
+    return response.data
+  },
 }

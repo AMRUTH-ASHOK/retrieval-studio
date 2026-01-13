@@ -1,12 +1,11 @@
 import { ReactNode } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
-import { 
-  FolderOpen, 
-  Hammer, 
-  FlaskConical, 
-  FileText, 
-  Trophy,
-  ChevronRight 
+import {
+  FolderOpen,
+  Hammer,
+  FlaskConical,
+  FileText,
+  ChevronRight
 } from 'lucide-react'
 import { useProject } from '../context/ProjectContext'
 import { Select } from './ui/Select'
@@ -27,7 +26,6 @@ export default function Layout({ children }: LayoutProps) {
     { text: 'Build', icon: Hammer, path: '/build' },
     { text: 'Evaluate', icon: FlaskConical, path: '/evaluate' },
     { text: 'Review', icon: FileText, path: '/review' },
-    { text: 'Leaderboard', icon: Trophy, path: '/leaderboard' },
   ]
 
   const projectOptions = projects.map(p => ({

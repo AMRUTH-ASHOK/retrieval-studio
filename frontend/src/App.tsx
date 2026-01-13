@@ -5,7 +5,6 @@ import ProjectDetails from './pages/ProjectDetails'
 import Build from './pages/Build'
 import Evaluate from './pages/Evaluate'
 import Review from './pages/Review'
-import Leaderboard from './pages/Leaderboard'
 
 function App() {
   return (
@@ -17,7 +16,6 @@ function App() {
         <Route path="/build" element={<Build />} />
         <Route path="/evaluate" element={<Evaluate />} />
         <Route path="/review" element={<Review />} />
-        <Route path="/leaderboard" element={<Leaderboard />} />
       </Routes>
     </Layout>
   )

@@ -130,6 +130,53 @@ def update_project(
     return connector.execute(query, tuple(params), fetch="one")
 
 
+def delete_project(project_id: str) -> bool:
+    """
+    Delete a project and all associated builds and evaluations
+
+    Returns True if project was deleted, False if not found
+    """
+    connector = get_postgres_connector()
+
+    # Check if project exists
+    project = get_project(project_id)
+    if not project:
+        return False
+
+    # Delete in reverse order of foreign key dependencies
+    # 1. Delete evaluations for all builds in this project
+    connector.execute(
+        """
+        DELETE FROM evaluations
+        WHERE project_id = %s
+        """,
+        (project_id,),
+        fetch="none"
+    )
+
+    # 2. Delete builds for this project
+    connector.execute(
+        """
+        DELETE FROM builds
+        WHERE project_id = %s
+        """,
+        (project_id,),
+        fetch="none"
+    )
+
+    # 3. Delete the project itself
+    connector.execute(
+        """
+        DELETE FROM projects
+        WHERE project_id = %s
+        """,
+        (project_id,),
+        fetch="none"
+    )
+
+    return True
+
+
 # ============================================================================
 # BUILD OPERATIONS
 # ============================================================================

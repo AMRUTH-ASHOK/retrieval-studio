@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Plus, ChevronRight } from 'lucide-react'
+import { Plus, ChevronRight, Trash2 } from 'lucide-react'
 import { projectsApi } from '../services/projects'
 import { useProject } from '../context/ProjectContext'
 import { Button } from '../components/ui/Button'
@@ -8,6 +8,7 @@ import { Input } from '../components/ui/Input'
 import { Modal } from '../components/ui/Modal'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '../components/ui/Table'
 import { Card } from '../components/ui/Card'
+import type { Project } from '../types'
 
 export default function ProjectSetup() {
   const navigate = useNavigate()
@@ -17,6 +18,10 @@ export default function ProjectSetup() {
   const [description, setDescription] = useState('')
   const [isCreating, setIsCreating] = useState(false)
   const [error, setError] = useState('')
+  const [showDeleteModal, setShowDeleteModal] = useState(false)
+  const [projectToDelete, setProjectToDelete] = useState<Project | null>(null)
+  const [isDeleting, setIsDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState('')
 
   const handleCreateProject = async () => {
     if (!projectName.trim()) {
@@ -50,6 +55,38 @@ export default function ProjectSetup() {
   const handleViewProject = (projectId: string) => {
     setSelectedProjectId(projectId)
     navigate(`/projects/${projectId}`)
+  }
+
+  const handleDeleteClick = (project: Project, e: React.MouseEvent) => {
+    e.stopPropagation()
+    setProjectToDelete(project)
+    setShowDeleteModal(true)
+    setDeleteError('')
+  }
+
+  const handleDeleteProject = async () => {
+    if (!projectToDelete) return
+
+    setIsDeleting(true)
+    setDeleteError('')
+
+    try {
+      await projectsApi.delete(projectToDelete.project_id)
+      // Clear selected project if it was the one deleted
+      if (projectToDelete.project_id === localStorage.getItem('selectedProjectId')) {
+        setSelectedProjectId(null)
+      }
+      // Refresh projects list
+      await loadProjects()
+      // Close modal
+      setShowDeleteModal(false)
+      setProjectToDelete(null)
+    } catch (err: any) {
+      console.error('Failed to delete project:', err)
+      setDeleteError(err?.response?.data?.detail || 'Failed to delete project. Please try again.')
+    } finally {
+      setIsDeleting(false)
+    }
   }
 
   return (
@@ -136,13 +173,24 @@ export default function ProjectSetup() {
                     </span>
                   </TableCell>
                   <TableCell className="text-right">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => handleViewProject(project.project_id)}
-                    >
-                      View Details →
-                    </Button>
+                    <div className="flex items-center justify-end gap-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleViewProject(project.project_id)}
+                      >
+                        View Details →
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={(e) => handleDeleteClick(project, e)}
+                        icon={<Trash2 className="w-4 h-4" />}
+                        className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                      >
+                        Delete
+                      </Button>
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}
@@ -208,6 +256,64 @@ export default function ProjectSetup() {
           </div>
           {error && projectName.trim() && (
             <p className="text-sm text-databricks-error">{error}</p>
+          )}
+        </div>
+      </Modal>
+
+      {/* Delete Confirmation Modal */}
+      <Modal
+        isOpen={showDeleteModal}
+        onClose={() => {
+          setShowDeleteModal(false)
+          setProjectToDelete(null)
+          setDeleteError('')
+        }}
+        title="Delete Project"
+        footer={
+          <>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setShowDeleteModal(false)
+                setProjectToDelete(null)
+                setDeleteError('')
+              }}
+              disabled={isDeleting}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              onClick={handleDeleteProject}
+              isLoading={isDeleting}
+              className="bg-red-600 hover:bg-red-700 text-white"
+            >
+              {isDeleting ? 'Deleting...' : 'Delete Project'}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <div className="p-4 bg-red-50 border border-red-200 rounded-md">
+            <p className="text-sm text-red-900 font-medium mb-2">
+              ⚠️ Warning: This action cannot be undone
+            </p>
+            <p className="text-sm text-red-800">
+              Deleting this project will permanently remove all builds, evaluations, and project configuration.
+            </p>
+          </div>
+
+          <div>
+            <p className="text-sm text-databricks-gray-900">
+              Are you sure you want to delete project{' '}
+              <strong className="text-databricks-gray-900">"{projectToDelete?.project_name}"</strong>?
+            </p>
+          </div>
+
+          {deleteError && (
+            <div className="p-3 bg-red-50 border border-red-200 rounded-md">
+              <p className="text-sm text-red-800">{deleteError}</p>
+            </div>
           )}
         </div>
       </Modal>

@@ -33,4 +33,9 @@ export const evaluationsApi = {
     const response = await api.get(`/evaluations/${runId}/results`)
     return response.data
   },
+
+  getByBuildRun: async (buildRunId: string): Promise<Evaluation[]> => {
+    const response = await api.get(`/evaluations/build/${buildRunId}`)
+    return response.data
+  },
 }

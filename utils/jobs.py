@@ -224,21 +224,21 @@ def get_job_url(w: WorkspaceClient, job_run_id: int) -> str:
     try:
         run = w.jobs.get_run(run_id=job_run_id)
         job_id = run.job_id if hasattr(run, 'job_id') and run.job_id else None
-        
+
         if not job_id:
             # For one-time runs submitted via jobs.submit(), the job_id might be None
             # In this case, we can't construct a proper URL
             return None
-        
+
         # Get workspace URL from config
         from databricks.sdk.core import Config
         cfg = Config()
         host = cfg.host
-        
+
         # Try to get workspace ID - it's often in the host URL or can be extracted
         # Format: https://<host>/jobs/<job_id>/runs/<run_id>?o=<workspace_id>
         workspace_id = None
-        
+
         # Try to get workspace ID from workspace client
         try:
             # The workspace ID might be available through the current user or workspace info
@@ -247,7 +247,7 @@ def get_job_url(w: WorkspaceClient, job_run_id: int) -> str:
             pass
         except:
             pass
-        
+
         # Construct URL - workspace_id is optional
         if workspace_id:
             return f"{host}/jobs/{job_id}/runs/{job_run_id}?o={workspace_id}"
@@ -256,4 +256,50 @@ def get_job_url(w: WorkspaceClient, job_run_id: int) -> str:
     except Exception as e:
         raise JobSubmissionError(
             handle_error(e, f"Failed to get job URL for {job_run_id}", show_traceback=False)
+        ) from e
+
+
+def get_job_run_output(w: WorkspaceClient, job_run_id: int) -> dict:
+    """
+    Get notebook output from a completed job run
+
+    Returns the notebook's return value (dbutils.notebook.exit(value))
+    This contains build results like chunks_table, index_name, etc. for each strategy
+
+    Args:
+        w: WorkspaceClient instance
+        job_run_id: Job run ID
+
+    Returns:
+        Dictionary with notebook output including status and results
+    """
+    try:
+        # Get run output from Databricks
+        output = w.jobs.get_run_output(run_id=job_run_id)
+
+        # Get run status
+        run = w.jobs.get_run(run_id=job_run_id)
+        status = run.state.result_state.value if run.state and run.state.result_state else "UNKNOWN"
+
+        # Parse notebook output
+        # The notebook_output.result contains the JSON string from dbutils.notebook.exit()
+        result_data = None
+        if hasattr(output, 'notebook_output') and output.notebook_output:
+            if hasattr(output.notebook_output, 'result'):
+                result_str = output.notebook_output.result
+                if result_str:
+                    try:
+                        result_data = json.loads(result_str)
+                    except json.JSONDecodeError:
+                        # If not valid JSON, return as-is
+                        result_data = result_str
+
+        return {
+            "status": status,
+            "results": result_data
+        }
+
+    except Exception as e:
+        raise JobSubmissionError(
+            handle_error(e, f"Failed to get job run output for {job_run_id}", show_traceback=False)
         ) from e
