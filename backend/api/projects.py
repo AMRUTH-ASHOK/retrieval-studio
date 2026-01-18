@@ -120,6 +120,22 @@ async def get_mlflow_experiment_url(project_id: str, sql_connector=Depends(get_u
         w = WorkspaceClient()
         workspace_url = w.config.host
 
+        # Get organization/workspace ID for MLflow URL
+        org_id = None
+
+        # Method 1: Try from workspace config
+        org_id = getattr(w.config, 'workspace_id', None)
+
+        # Method 2: Extract from current user (fallback)
+        if not org_id:
+            try:
+                current_user = w.current_user.me()
+                # Try to get workspace ID from user context
+                if hasattr(current_user, 'active_workspace_id'):
+                    org_id = current_user.active_workspace_id
+            except Exception:
+                pass
+
         # Get MLflow client and experiment
         client = MlflowClient()
         experiment = client.get_experiment_by_name(experiment_name)
@@ -130,11 +146,14 @@ async def get_mlflow_experiment_url(project_id: str, sql_connector=Depends(get_u
             encoded_name = urllib.parse.quote(experiment_name)
             mlflow_url = f"{workspace_url}/#mlflow/experiments?searchFilter=name%3D%22{encoded_name}%22"
         else:
-            # Construct direct MLflow experiment URL
-            # Format: https://<host>/ml/experiments/<experiment_id>
-            # Note: workspace_id parameter (?o=<workspace_id>) is optional and not always needed
+            # Construct direct MLflow experiment URL with /runs path and org_id
+            # Format: https://<host>/ml/experiments/<experiment_id>/runs?o=<org_id>
             experiment_id = experiment.experiment_id
-            mlflow_url = f"{workspace_url}/ml/experiments/{experiment_id}"
+            if org_id:
+                mlflow_url = f"{workspace_url}/ml/experiments/{experiment_id}/runs?o={org_id}"
+            else:
+                # Fallback without org_id parameter (still functional but less ideal)
+                mlflow_url = f"{workspace_url}/ml/experiments/{experiment_id}/runs"
 
         return {
             "experiment_name": experiment_name,

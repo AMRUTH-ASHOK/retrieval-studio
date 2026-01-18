@@ -219,6 +219,16 @@ CREATE TABLE IF NOT EXISTS {eval_results_table} (
 USING DELTA
 """)
 
+# Add new columns if they don't exist (for backwards compatibility)
+try:
+    spark.sql(f"ALTER TABLE {eval_results_table} ADD COLUMNS (expected_chunks STRING, retrieved_chunks STRING)")
+    print(f"Added expected_chunks and retrieved_chunks columns to {eval_results_table}")
+except Exception as e:
+    if "already exists" in str(e).lower() or "cannot resolve" in str(e).lower():
+        print(f"Columns already exist in {eval_results_table}")
+    else:
+        print(f"Note: Could not add columns (may already exist): {e}")
+
 # COMMAND ----------
 # MAGIC %md
 # MAGIC ## Run Evaluation
@@ -482,7 +492,24 @@ with mlflow.start_run(run_name=f"eval_{build_run_id[:8]}") as eval_parent:
 
 # COMMAND ----------
 if all_rows:
-    df = spark.createDataFrame(all_rows).withColumn("created_at", current_timestamp())
+    from pyspark.sql.types import StructType, StructField, StringType
+
+    # Define explicit schema to avoid type inference issues
+    schema = StructType([
+        StructField("eval_result_id", StringType(), False),
+        StructField("build_run_id", StringType(), False),
+        StructField("eval_run_id", StringType(), False),
+        StructField("build_child_run_id", StringType(), False),
+        StructField("project", StringType(), False),
+        StructField("strategy", StringType(), False),
+        StructField("query_type", StringType(), False),
+        StructField("query_text", StringType(), False),
+        StructField("expected_chunks", StringType(), True),  # Can be None
+        StructField("retrieved_chunks", StringType(), False),
+        StructField("metrics", StringType(), False),
+    ])
+
+    df = spark.createDataFrame(all_rows, schema=schema).withColumn("created_at", current_timestamp())
     df.write.format("delta").mode("append").saveAsTable(eval_results_table)
     print(f"Saved {len(all_rows)} result rows to {eval_results_table}")
 

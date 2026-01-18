@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
-import { ExternalLink, RefreshCw, ChevronDown, ChevronRight, Clock, CheckCircle, XCircle, PlayCircle } from 'lucide-react'
+import { ExternalLink, RefreshCw, ChevronDown, ChevronRight, Clock, CheckCircle, XCircle, PlayCircle, ChevronUp, Check, X, Download } from 'lucide-react'
+import Plot from 'react-plotly.js'
 import { projectsApi } from '../services/projects'
 import { useProject } from '../context/ProjectContext'
 import { Button } from '../components/ui/Button'
@@ -40,6 +41,12 @@ export default function Review() {
     params: true,
     tags: false,
   })
+  const [selectedMetric, setSelectedMetric] = useState<string>('recall')
+  const [selectedK, setSelectedK] = useState<number>(5)
+  const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set())
+  const [currentPage, setCurrentPage] = useState(1)
+  const [searchQuery, setSearchQuery] = useState('')
+  const resultsPerPage = 50
 
   useEffect(() => {
     if (selectedProjectId) {
@@ -172,6 +179,89 @@ export default function Review() {
     }))
   }
 
+  const toggleRow = (idx: number) => {
+    setExpandedRows(prev => {
+      const newSet = new Set(prev)
+      if (newSet.has(idx)) {
+        newSet.delete(idx)
+      } else {
+        newSet.add(idx)
+      }
+      return newSet
+    })
+  }
+
+  const getQualityColor = (value: number, metricType: 'recall' | 'ndcg' | 'latency' | 'relevance') => {
+    if (metricType === 'latency') {
+      if (value < 100) return 'text-green-600 bg-green-50 border-green-200'
+      if (value < 500) return 'text-yellow-600 bg-yellow-50 border-yellow-200'
+      return 'text-red-600 bg-red-50 border-red-200'
+    } else {
+      if (value >= 0.8) return 'text-green-600 bg-green-50 border-green-200'
+      if (value >= 0.5) return 'text-yellow-600 bg-yellow-50 border-yellow-200'
+      return 'text-red-600 bg-red-50 border-red-200'
+    }
+  }
+
+  const processMetricsData = () => {
+    const strategyRuns = mlflowRuns.filter(r => r.role === 'eval_strategy')
+
+    const byStrategy: Record<string, MLflowRun[]> = {}
+    strategyRuns.forEach(run => {
+      const strategy = run.tags?.strategy || run.params?.strategy || 'unknown'
+      if (!byStrategy[strategy]) byStrategy[strategy] = []
+      byStrategy[strategy].push(run)
+    })
+
+    return Object.entries(byStrategy).map(([strategy, runs]) => ({
+      strategy,
+      recall_at_5: runs[0]?.metrics?.[`recall_at_5`] || 0,
+      recall_at_10: runs[0]?.metrics?.[`recall_at_10`] || 0,
+      ndcg_at_5: runs[0]?.metrics?.[`ndcg_at_5`] || 0,
+      ndcg_at_10: runs[0]?.metrics?.[`ndcg_at_10`] || 0,
+      avg_relevance_at_5: runs[0]?.metrics?.[`avg_relevance_at_5`] || 0,
+      avg_relevance_at_10: runs[0]?.metrics?.[`avg_relevance_at_10`] || 0,
+      avg_latency_ms: runs[0]?.metrics?.[`avg_latency_ms`] || 0,
+    }))
+  }
+
+  const exportToCSV = () => {
+    const headers = ['Query', 'Strategy', 'Type', 'Recall@5', 'NDCG@5', 'Relevance', 'Latency (ms)']
+    const rows = runResults.map((result: any) => {
+      const metrics = typeof result.metrics === 'string' ? JSON.parse(result.metrics) : result.metrics || {}
+      return [
+        `"${result.query_text || ''}"`,
+        result.strategy || '',
+        result.query_type || '',
+        metrics.recall_at_5 || '',
+        metrics.ndcg_at_5 || '',
+        metrics.avg_relevance_at_5 || '',
+        metrics.retrieval_latency_ms || ''
+      ].join(',')
+    })
+
+    const csv = [headers.join(','), ...rows].join('\n')
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url = window.URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `evaluation-results-${selectedRun?.run_id || 'export'}.csv`
+    a.click()
+    window.URL.revokeObjectURL(url)
+  }
+
+  const filteredResults = runResults.filter((result: any) => {
+    if (!searchQuery) return true
+    return result.query_text?.toLowerCase().includes(searchQuery.toLowerCase())
+  })
+
+  const paginatedResults = filteredResults.slice(
+    (currentPage - 1) * resultsPerPage,
+    currentPage * resultsPerPage
+  )
+
+  const totalPages = Math.ceil(filteredResults.length / resultsPerPage)
+
   return (
     <div>
       <div className="flex justify-between items-center mb-6">
@@ -226,6 +316,116 @@ export default function Review() {
                 <ExternalLink className="w-4 h-4 mr-1" />
                 Open in MLflow UI
               </a>
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {/* Metrics Visualization */}
+      {mlflowRuns.length > 0 && mlflowRuns.some(r => r.role === 'eval_strategy') && (
+        <Card className="mb-6">
+          <h2 className="text-lg font-semibold text-databricks-gray-900 mb-4">
+            📈 Metrics Comparison
+          </h2>
+
+          <div className="flex gap-4 mb-4">
+            <div>
+              <label className="text-xs font-medium text-databricks-gray-700 mb-1 block">Metric</label>
+              <select
+                value={selectedMetric}
+                onChange={(e) => setSelectedMetric(e.target.value)}
+                className="px-3 py-2 border border-databricks-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-databricks-blue"
+              >
+                <option value="recall">Recall</option>
+                <option value="ndcg">NDCG</option>
+                <option value="avg_relevance">Relevance</option>
+                <option value="avg_latency_ms">Latency (ms)</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="text-xs font-medium text-databricks-gray-700 mb-1 block">K Value</label>
+              <select
+                value={selectedK}
+                onChange={(e) => setSelectedK(Number(e.target.value))}
+                className="px-3 py-2 border border-databricks-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-databricks-blue"
+                disabled={selectedMetric === 'avg_latency_ms'}
+              >
+                <option value={5}>@5</option>
+                <option value={10}>@10</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Strategy Comparison Bar Chart */}
+            <div>
+              <Plot
+                data={[
+                  {
+                    x: processMetricsData().map(d => d.strategy),
+                    y: processMetricsData().map(d => {
+                      const metricKey = selectedMetric === 'avg_latency_ms'
+                        ? 'avg_latency_ms'
+                        : `${selectedMetric}_at_${selectedK}`
+                      return d[metricKey as keyof typeof d] || 0
+                    }),
+                    type: 'bar',
+                    marker: {
+                      color: processMetricsData().map((_, idx) =>
+                        ['#0066cc', '#00a86b', '#8b4789'][idx % 3]
+                      ),
+                    },
+                    text: processMetricsData().map(d => {
+                      const metricKey = selectedMetric === 'avg_latency_ms'
+                        ? 'avg_latency_ms'
+                        : `${selectedMetric}_at_${selectedK}`
+                      const value = d[metricKey as keyof typeof d] || 0
+                      return typeof value === 'number' ? value.toFixed(3) : value
+                    }),
+                    textposition: 'outside',
+                  },
+                ]}
+                layout={{
+                  title: `${selectedMetric === 'avg_latency_ms' ? 'Latency' : selectedMetric.toUpperCase()}${selectedMetric !== 'avg_latency_ms' ? `@${selectedK}` : ''} by Strategy`,
+                  xaxis: { title: 'Strategy' },
+                  yaxis: { title: selectedMetric === 'avg_latency_ms' ? 'Latency (ms)' : 'Score' },
+                  height: 350,
+                  margin: { t: 50, b: 50, l: 60, r: 20 },
+                }}
+                config={{ responsive: true, displayModeBar: false }}
+                style={{ width: '100%' }}
+              />
+            </div>
+
+            {/* Latency vs Quality Scatter */}
+            <div>
+              <Plot
+                data={[
+                  {
+                    x: processMetricsData().map(d => d.avg_latency_ms),
+                    y: processMetricsData().map(d => d[`recall_at_${selectedK}` as keyof typeof d] || 0),
+                    mode: 'markers',
+                    type: 'scatter',
+                    text: processMetricsData().map(d => d.strategy),
+                    marker: {
+                      size: 12,
+                      color: processMetricsData().map((_, idx) =>
+                        ['#0066cc', '#00a86b', '#8b4789'][idx % 3]
+                      ),
+                    },
+                  },
+                ]}
+                layout={{
+                  title: `Latency vs Recall@${selectedK}`,
+                  xaxis: { title: 'Latency (ms)' },
+                  yaxis: { title: `Recall@${selectedK}` },
+                  height: 350,
+                  margin: { t: 50, b: 50, l: 60, r: 20 },
+                }}
+                config={{ responsive: true, displayModeBar: false }}
+                style={{ width: '100%' }}
+              />
             </div>
           </div>
         </Card>
@@ -462,92 +662,281 @@ export default function Review() {
         </div>
       )}
 
-      {/* Detailed Results Section */}
+      {/* Enhanced Query Results Section */}
       {selectedRun && (
         <Card className="col-span-1 lg:col-span-3 mt-6">
           <div className="mb-4 flex justify-between items-center">
             <h3 className="text-lg font-semibold text-databricks-gray-900">
-              Detailed Results
+              📋 Query Results
             </h3>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={isResultsLoading}
-              onClick={loadRunResults}
-              icon={<RefreshCw className={`w-3 h-3 ${isResultsLoading ? 'animate-spin' : ''}`} />}
-            >
-              Refresh Results
-            </Button>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={exportToCSV}
+                disabled={runResults.length === 0}
+                icon={<Download className="w-3 h-3" />}
+              >
+                Export CSV
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={isResultsLoading}
+                onClick={loadRunResults}
+                icon={<RefreshCw className={`w-3 h-3 ${isResultsLoading ? 'animate-spin' : ''}`} />}
+              >
+                Refresh
+              </Button>
+            </div>
           </div>
+
+          {/* Search Box */}
+          {runResults.length > 0 && (
+            <div className="mb-4">
+              <input
+                type="text"
+                placeholder="Search queries..."
+                value={searchQuery}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value)
+                  setCurrentPage(1)
+                }}
+                className="px-4 py-2 border border-databricks-gray-300 rounded-md text-sm w-full max-w-md focus:outline-none focus:ring-2 focus:ring-databricks-blue"
+              />
+            </div>
+          )}
 
           {isResultsLoading ? (
             <div className="flex justify-center py-8">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-databricks-blue"></div>
             </div>
-          ) : runResults.length > 0 ? (
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
-                  <tr>
-                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Query
-                    </th>
-                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Metrics
-                    </th>
-                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Latency
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
-                  {runResults.map((result: any, idx: number) => {
-                    const metrics = typeof result.metrics === 'string'
-                      ? JSON.parse(result.metrics)
-                      : result.metrics || {};
+          ) : paginatedResults.length > 0 ? (
+            <>
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="w-8"></th>
+                      <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                        Query
+                      </th>
+                      <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                        Strategy
+                      </th>
+                      <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                        Type
+                      </th>
+                      <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                        Recall@5
+                      </th>
+                      <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                        NDCG@5
+                      </th>
+                      <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                        Relevance
+                      </th>
+                      <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                        Latency
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {paginatedResults.map((result: any, idx: number) => {
+                      const globalIdx = (currentPage - 1) * resultsPerPage + idx
+                      const metrics = typeof result.metrics === 'string' ? JSON.parse(result.metrics) : result.metrics || {}
+                      const expectedChunks = result.expected_chunks ? JSON.parse(result.expected_chunks) : []
+                      const retrievedChunks = result.retrieved_chunks ? JSON.parse(result.retrieved_chunks) : []
+                      const isExpanded = expandedRows.has(globalIdx)
 
-                    return (
-                      <tr key={idx} className="hover:bg-gray-50">
-                        <td className="px-6 py-4 text-sm text-gray-900 max-w-md">
-                          <p className="font-medium mb-1">{result.query_text}</p>
-                          <p className="text-xs text-gray-500 truncate">
-                            Type: {result.query_type}
-                          </p>
-                        </td>
-                        <td className="px-6 py-4 text-sm text-gray-500">
-                          <div className="space-y-1">
-                            {metrics.recall_at_10 !== undefined && (
-                              <div className="flex justify-between w-32">
-                                <span className="text-xs">Recall@10:</span>
-                                <span className="font-mono font-medium">{formatMetricValue(metrics.recall_at_10)}</span>
-                              </div>
-                            )}
-                            {metrics.ndcg_at_10 !== undefined && (
-                              <div className="flex justify-between w-32">
-                                <span className="text-xs">NDCG@10:</span>
-                                <span className="font-mono font-medium">{formatMetricValue(metrics.ndcg_at_10)}</span>
-                              </div>
-                            )}
-                            {metrics.avg_relevance_at_10 !== undefined && (
-                              <div className="flex justify-between w-32">
-                                <span className="text-xs">Relevance:</span>
-                                <span className="font-mono font-medium">{formatMetricValue(metrics.avg_relevance_at_10)}</span>
-                              </div>
-                            )}
-                          </div>
-                        </td>
-                        <td className="px-6 py-4 text-sm text-gray-500 whitespace-nowrap">
-                          <div className="flex items-center">
-                            <Clock className="w-3 h-3 mr-1 text-gray-400" />
-                            {metrics.retrieval_latency_ms ? `${Math.round(metrics.retrieval_latency_ms)}ms` : '-'}
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+                      const recall = metrics.recall_at_5 || 0
+                      const ndcg = metrics.ndcg_at_5 || 0
+                      const relevance = metrics.avg_relevance_at_5 || 0
+                      const latency = metrics.retrieval_latency_ms || 0
+
+                      return (
+                        <>
+                          <tr key={globalIdx} className="hover:bg-gray-50 cursor-pointer">
+                            <td className="px-2 py-3">
+                              <button onClick={() => toggleRow(globalIdx)} className="p-1 hover:bg-gray-200 rounded">
+                                {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                              </button>
+                            </td>
+                            <td className="px-4 py-3 text-sm text-gray-900 max-w-xs">
+                              <p className="truncate" title={result.query_text}>
+                                {result.query_text}
+                              </p>
+                            </td>
+                            <td className="px-4 py-3">
+                              <Badge variant="info">{result.strategy || 'N/A'}</Badge>
+                            </td>
+                            <td className="px-4 py-3">
+                              <Badge variant={result.query_type === 'ANN' ? 'success' : 'warning'}>
+                                {result.query_type || 'N/A'}
+                              </Badge>
+                            </td>
+                            <td className="px-4 py-3">
+                              <span className={`px-2 py-1 rounded text-xs font-medium border ${getQualityColor(recall, 'recall')}`}>
+                                {formatMetricValue(recall)}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3">
+                              <span className={`px-2 py-1 rounded text-xs font-medium border ${getQualityColor(ndcg, 'ndcg')}`}>
+                                {formatMetricValue(ndcg)}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3">
+                              <span className={`px-2 py-1 rounded text-xs font-medium border ${getQualityColor(relevance, 'relevance')}`}>
+                                {formatMetricValue(relevance)}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3">
+                              <span className={`px-2 py-1 rounded text-xs font-medium border ${getQualityColor(latency, 'latency')}`}>
+                                {Math.round(latency)}ms
+                              </span>
+                            </td>
+                          </tr>
+
+                          {/* Expanded Row Details */}
+                          {isExpanded && (
+                            <tr key={`${globalIdx}-expanded`}>
+                              <td colSpan={8} className="px-6 py-4 bg-gray-50">
+                                <div className="space-y-4">
+                                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                    {/* Expected Chunks */}
+                                    {expectedChunks.length > 0 && (
+                                      <div>
+                                        <h4 className="text-sm font-semibold text-gray-900 mb-2">
+                                          Expected Chunks (Ground Truth)
+                                        </h4>
+                                        <div className="border rounded-md overflow-hidden">
+                                          <table className="min-w-full text-xs">
+                                            <thead className="bg-gray-100">
+                                              <tr>
+                                                <th className="px-3 py-2 text-left">Chunk ID</th>
+                                                <th className="px-3 py-2 text-left">Rank</th>
+                                                <th className="px-3 py-2 text-left">Match</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody className="bg-white">
+                                              {expectedChunks.slice(0, 10).map((chunkId: string, i: number) => {
+                                                const isInRetrieved = retrievedChunks.includes(chunkId)
+                                                return (
+                                                  <tr key={i} className="border-t">
+                                                    <td className="px-3 py-2 font-mono text-xs">{chunkId}</td>
+                                                    <td className="px-3 py-2">{i + 1}</td>
+                                                    <td className="px-3 py-2">
+                                                      {isInRetrieved ? (
+                                                        <Check className="w-4 h-4 text-green-600" />
+                                                      ) : (
+                                                        <X className="w-4 h-4 text-red-600" />
+                                                      )}
+                                                    </td>
+                                                  </tr>
+                                                )
+                                              })}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {/* Retrieved Chunks */}
+                                    {retrievedChunks.length > 0 && (
+                                      <div>
+                                        <h4 className="text-sm font-semibold text-gray-900 mb-2">
+                                          Retrieved Chunks (Actual Results)
+                                        </h4>
+                                        <div className="border rounded-md overflow-hidden">
+                                          <table className="min-w-full text-xs">
+                                            <thead className="bg-gray-100">
+                                              <tr>
+                                                <th className="px-3 py-2 text-left">Chunk ID</th>
+                                                <th className="px-3 py-2 text-left">Rank</th>
+                                                <th className="px-3 py-2 text-left">Match</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody className="bg-white">
+                                              {retrievedChunks.slice(0, 10).map((chunkId: string, i: number) => {
+                                                const isInExpected = expectedChunks.includes(chunkId)
+                                                return (
+                                                  <tr key={i} className="border-t">
+                                                    <td className="px-3 py-2 font-mono text-xs">{chunkId}</td>
+                                                    <td className="px-3 py-2">{i + 1}</td>
+                                                    <td className="px-3 py-2">
+                                                      {isInExpected ? (
+                                                        <Check className="w-4 h-4 text-green-600" />
+                                                      ) : (
+                                                        <X className="w-4 h-4 text-gray-400" />
+                                                      )}
+                                                    </td>
+                                                  </tr>
+                                                )
+                                              })}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  {/* Metrics Breakdown */}
+                                  <div>
+                                    <h4 className="text-sm font-semibold text-gray-900 mb-2">All Metrics</h4>
+                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                                      {Object.entries(metrics).map(([key, value]: [string, any]) => (
+                                        <div key={key} className="p-2 bg-white border rounded-md">
+                                          <p className="text-xs text-gray-600">{key}</p>
+                                          <p className="text-sm font-semibold text-gray-900">
+                                            {typeof value === 'number' ? formatMetricValue(value) : value}
+                                          </p>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Pagination */}
+              {totalPages > 1 && (
+                <div className="mt-4 flex items-center justify-between">
+                  <p className="text-sm text-gray-600">
+                    Showing {(currentPage - 1) * resultsPerPage + 1} to{' '}
+                    {Math.min(currentPage * resultsPerPage, filteredResults.length)} of{' '}
+                    {filteredResults.length} results
+                  </p>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                      disabled={currentPage === 1}
+                    >
+                      Previous
+                    </Button>
+                    <span className="px-3 py-1 text-sm">
+                      Page {currentPage} of {totalPages}
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                      disabled={currentPage === totalPages}
+                    >
+                      Next
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </>
           ) : (
             <div className="text-center py-8 bg-gray-50 rounded-lg border border-dashed border-gray-300">
               <p className="text-databricks-gray-600">
