@@ -435,6 +435,39 @@ def get_job_run(job_run_id: int) -> Optional[Dict[str, Any]]:
 
 
 # ============================================================================
+# MLflow Integration Helpers
+# ============================================================================
+
+def get_experiment_id_for_project(project_id: str) -> Optional[str]:
+    """
+    Get the most recent successful build's experiment_id for a project
+
+    Args:
+        project_id: The project UUID
+
+    Returns:
+        experiment_id string if found, None otherwise
+    """
+    connector = get_postgres_connector()
+
+    result = connector.execute(
+        """
+        SELECT experiment_id
+        FROM builds
+        WHERE project_id = %s
+          AND state = 'SUCCESS'
+          AND experiment_id IS NOT NULL
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (project_id,),
+        fetch="one"
+    )
+
+    return result['experiment_id'] if result else None
+
+
+# ============================================================================
 # BACKWARD COMPATIBILITY ALIASES
 # ============================================================================
 

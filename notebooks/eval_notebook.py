@@ -224,8 +224,12 @@ try:
     spark.sql(f"ALTER TABLE {eval_results_table} ADD COLUMNS (expected_chunks STRING, retrieved_chunks STRING)")
     print(f"Added expected_chunks and retrieved_chunks columns to {eval_results_table}")
 except Exception as e:
-    if "already exists" in str(e).lower() or "cannot resolve" in str(e).lower():
-        print(f"Columns already exist in {eval_results_table}")
+    error_str = str(e).lower()
+    if ("already exists" in error_str or 
+        "cannot resolve" in error_str or 
+        "field_already_exists" in error_str or
+        "42710" in str(e)):  # SQLSTATE 42710 = duplicate column
+        print(f"Columns already exist in {eval_results_table} - skipping")
     else:
         print(f"Note: Could not add columns (may already exist): {e}")
 
@@ -483,8 +487,6 @@ with mlflow.start_run(run_name=f"eval_{build_run_id[:8]}") as eval_parent:
                     print(f"\n  ❌ ERROR logging metrics to MLflow: {e}")
                     import traceback
                     traceback.print_exc()
-                
-                print(f"\n  {query_type} - Summary: Processed {num_queries_processed} queries")
                 
                 print(f"\n  {query_type} - Summary: Processed {num_queries_processed} queries")
 

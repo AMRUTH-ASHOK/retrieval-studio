@@ -3,7 +3,7 @@
 # MAGIC # Retrieval Studio - Build Job (Product)
 
 # COMMAND ----------
-# MAGIC %pip install databricks-vectorsearch mlflow --quiet
+# MAGIC %pip install databricks-vectorsearch mlflow "databricks-sdk>=0.61.0" --quiet
 # COMMAND ----------
 dbutils.library.restartPython()
 
@@ -165,7 +165,32 @@ USING DELTA
 # COMMAND ----------
 import mlflow
 experiment_name = core_config.get_experiment_name(project_name)
-mlflow.set_experiment(experiment_name)
+experiment = mlflow.set_experiment(experiment_name)
+
+# Log experiment details for visibility
+print(f"[INFO] ✓ MLflow Experiment Set")
+print(f"[INFO]   - Name: {experiment_name}")
+print(f"[INFO]   - ID: {experiment.experiment_id}")
+print(f"[INFO]   - Artifact Location: {experiment.artifact_location}")
+
+# Store experiment ID in database for accurate MLflow lookups
+try:
+    from utils.postgres_state import update_build_state
+
+    update_build_state(
+        run_id=run_id,
+        state='RUNNING',
+        experiment_id=experiment.experiment_id
+    )
+
+    print(f"[INFO] ✓ Stored experiment_id={experiment.experiment_id} in builds table for run_id={run_id}")
+
+except Exception as e:
+    # Log error but don't fail the build - experiment_id is for convenience
+    print(f"[ERROR] ✗ Failed to store experiment_id in database: {e}")
+    print(f"[WARNING] Build will continue, but API lookups may use fallback name-based lookup")
+    import traceback
+    traceback.print_exc()
 
 strategy_results = {}
 

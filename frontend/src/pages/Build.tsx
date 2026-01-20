@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { PlayCircle, ChevronRight, ChevronLeft, CheckCircle2, ExternalLink, Clock, Copy, CheckCircle } from 'lucide-react'
+import { PlayCircle, ChevronRight, ChevronLeft, CheckCircle2, ExternalLink, Clock, Copy, CheckCircle, Plus, Trash2 } from 'lucide-react'
 import { buildsApi } from '../services/builds'
 import { metadataApi } from '../services/metadata'
 import { DataType, Strategy } from '../types'
@@ -21,7 +21,9 @@ export default function Build() {
   const [selectedStrategies, setSelectedStrategies] = useState<string[]>([])
   const [embeddingEndpoint, setEmbeddingEndpoint] = useState('')
   const [vsEndpoint, setVsEndpoint] = useState('')
-  const [dataConfig, setDataConfig] = useState<Record<string, any>>({})
+  const [dataSources, setDataSources] = useState<Array<{ id: string; config: Record<string, any> }>>([
+    { id: crypto.randomUUID(), config: {} }
+  ])
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [submittedRunId, setSubmittedRunId] = useState<string | null>(null)
@@ -58,7 +60,7 @@ export default function Build() {
       pollJobStatus()
       pollingIntervalRef.current = setInterval(pollJobStatus, 5000) // Poll every 5 seconds
     }
-    
+
     return () => {
       if (pollingIntervalRef.current) {
         clearInterval(pollingIntervalRef.current)
@@ -66,6 +68,13 @@ export default function Build() {
       }
     }
   }, [submittedRunId])
+
+  useEffect(() => {
+    // Reset data sources when data type changes
+    if (selectedDataType) {
+      setDataSources([{ id: crypto.randomUUID(), config: {} }])
+    }
+  }, [selectedDataType])
 
   const pollJobStatus = async () => {
     if (!submittedRunId) return
@@ -168,6 +177,24 @@ export default function Build() {
     )
   }
 
+  const addDataSource = () => {
+    setDataSources((prev) => [...prev, { id: crypto.randomUUID(), config: {} }])
+  }
+
+  const removeDataSource = (id: string) => {
+    setDataSources((prev) => prev.filter((source) => source.id !== id))
+  }
+
+  const updateDataSource = (id: string, field: string, value: any) => {
+    setDataSources((prev) =>
+      prev.map((source) =>
+        source.id === id
+          ? { ...source, config: { ...source.config, [field]: value } }
+          : source
+      )
+    )
+  }
+
   const handleSubmit = async () => {
     if (!selectedProjectId) {
       setError('Please select a project first')
@@ -178,6 +205,32 @@ export default function Build() {
     setError('')
 
     try {
+      // Combine multiple data sources based on data type
+      let dataConfig: Record<string, any> = {}
+
+      if (selectedDataType === 'text') {
+        // Text type: combine into text_entries array
+        dataConfig = {
+          text_entries: dataSources.map((source) => source.config)
+        }
+      } else if (selectedDataType === 'delta_table') {
+        // Delta table: combine into tables array
+        dataConfig = {
+          tables: dataSources.map((source) => source.config)
+        }
+      } else if (['csv', 'json', 'pdf'].includes(selectedDataType)) {
+        // File types: combine uploaded_files arrays
+        dataConfig = {
+          uploaded_files: dataSources.flatMap((source) => source.config.uploaded_files || []),
+          // Take other config from first source
+          ...dataSources[0]?.config,
+          uploaded_files: dataSources.flatMap((source) => source.config.uploaded_files || [])
+        }
+      } else {
+        // Other types: use first source's config (backward compatibility)
+        dataConfig = dataSources[0]?.config || {}
+      }
+
       const config = {
         data_type: selectedDataType,
         data_config: dataConfig,
@@ -222,7 +275,7 @@ export default function Build() {
       setActiveStep(0)
       setSelectedDataType('')
       setSelectedStrategies([])
-      setDataConfig({})
+      setDataSources([{ id: crypto.randomUUID(), config: {} }])
       setEmbeddingEndpoint('')
       setVsEndpoint('')
     } catch (error) {
@@ -266,60 +319,93 @@ export default function Build() {
       case 1:
         return (
           <div className="space-y-4">
-            <h3 className="text-lg font-medium text-databricks-gray-900 mb-4">
-              Configure Data Source
-            </h3>
-            {selectedDataTypeInfo?.input_schema?.fields?.map((field: any) => {
-              if (field.type === 'textarea') {
-                return (
-                  <div key={field.name}>
-                    <label className="block text-sm font-medium text-databricks-gray-700 mb-1">
-                      {field.label}
-                      {field.required && <span className="text-databricks-error ml-1">*</span>}
-                    </label>
-                    <textarea
-                      value={dataConfig[field.name] || ''}
-                      onChange={(e) =>
-                        setDataConfig((prev) => ({ ...prev, [field.name]: e.target.value }))
-                      }
-                      placeholder={field.default || ''}
-                      required={field.required}
-                      rows={6}
-                      className="w-full px-3 py-2 border border-databricks-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-databricks-blue focus:border-databricks-blue"
-                    />
-                  </div>
-                )
-              } else if (field.type === 'bool') {
-                return (
-                  <div key={field.name} className="flex items-center">
-                    <input
-                      type="checkbox"
-                      checked={dataConfig[field.name] || field.default || false}
-                      onChange={(e) =>
-                        setDataConfig((prev) => ({ ...prev, [field.name]: e.target.checked }))
-                      }
-                      className="h-4 w-4 text-databricks-blue border-databricks-gray-300 rounded focus:ring-databricks-blue"
-                    />
-                    <label className="ml-2 text-sm text-databricks-gray-700">
-                      {field.label}
-                    </label>
-                  </div>
-                )
-              } else {
-                return (
-                  <Input
-                    key={field.name}
-                    label={field.label}
-                    placeholder={field.default || ''}
-                    required={field.required}
-                    onChange={(e) =>
-                      setDataConfig((prev) => ({ ...prev, [field.name]: e.target.value }))
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-medium text-databricks-gray-900">
+                Configure Data Source{dataSources.length > 1 ? 's' : ''}
+              </h3>
+              <Badge variant="secondary">{dataSources.length} source{dataSources.length > 1 ? 's' : ''}</Badge>
+            </div>
+
+            {/* Render each data source as a card */}
+            {dataSources.map((source, index) => (
+              <Card key={source.id} className="p-4 border-2 border-databricks-gray-200">
+                <div className="flex items-center justify-between mb-4">
+                  <h4 className="text-md font-medium text-databricks-gray-800">
+                    Source {index + 1}
+                  </h4>
+                  {dataSources.length > 1 && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => removeDataSource(source.id)}
+                      className="text-databricks-error hover:bg-red-50"
+                    >
+                      <Trash2 className="w-4 h-4 mr-1" />
+                      Remove
+                    </Button>
+                  )}
+                </div>
+
+                <div className="space-y-4">
+                  {selectedDataTypeInfo?.input_schema?.fields?.map((field: any) => {
+                    if (field.type === 'textarea') {
+                      return (
+                        <div key={field.name}>
+                          <label className="block text-sm font-medium text-databricks-gray-700 mb-1">
+                            {field.label}
+                            {field.required && <span className="text-databricks-error ml-1">*</span>}
+                          </label>
+                          <textarea
+                            value={source.config[field.name] || ''}
+                            onChange={(e) => updateDataSource(source.id, field.name, e.target.value)}
+                            placeholder={field.default || ''}
+                            required={field.required}
+                            rows={6}
+                            className="w-full px-3 py-2 border border-databricks-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-databricks-blue focus:border-databricks-blue"
+                          />
+                        </div>
+                      )
+                    } else if (field.type === 'bool') {
+                      return (
+                        <div key={field.name} className="flex items-center">
+                          <input
+                            type="checkbox"
+                            checked={source.config[field.name] || field.default || false}
+                            onChange={(e) => updateDataSource(source.id, field.name, e.target.checked)}
+                            className="h-4 w-4 text-databricks-blue border-databricks-gray-300 rounded focus:ring-databricks-blue"
+                          />
+                          <label className="ml-2 text-sm text-databricks-gray-700">
+                            {field.label}
+                          </label>
+                        </div>
+                      )
+                    } else {
+                      return (
+                        <Input
+                          key={field.name}
+                          label={field.label}
+                          placeholder={field.default || ''}
+                          required={field.required}
+                          onChange={(e) => updateDataSource(source.id, field.name, e.target.value)}
+                          value={source.config[field.name] || ''}
+                        />
+                      )
                     }
-                    value={dataConfig[field.name] || ''}
-                  />
-                )
-              }
-            })}
+                  })}
+                </div>
+              </Card>
+            ))}
+
+            {/* Add Another Source Button */}
+            <Button
+              variant="outline"
+              onClick={addDataSource}
+              className="w-full border-2 border-dashed border-databricks-gray-300 hover:border-databricks-blue hover:bg-blue-50"
+            >
+              <Plus className="w-4 h-4 mr-2" />
+              Add Another {selectedDataTypeInfo?.display_name || 'Source'}
+            </Button>
+
             {selectedDataTypeInfo && selectedDataTypeInfo.input_schema?.source_type === 'upload' && (
               <div className="p-4 bg-databricks-gray-50 rounded-md border border-databricks-gray-200">
                 <p className="text-sm text-databricks-gray-600">

@@ -8,7 +8,6 @@ import {
   ChevronRight
 } from 'lucide-react'
 import { useProject } from '../context/ProjectContext'
-import { Select } from './ui/Select'
 
 const drawerWidth = 260
 
@@ -19,7 +18,6 @@ interface LayoutProps {
 export default function Layout({ children }: LayoutProps) {
   const navigate = useNavigate()
   const location = useLocation()
-  const { projects, selectedProjectId, setSelectedProjectId, isLoading } = useProject()
 
   const menuItems = [
     { text: 'Projects', icon: FolderOpen, path: '/projects' },
@@ -27,11 +25,6 @@ export default function Layout({ children }: LayoutProps) {
     { text: 'Evaluate', icon: FlaskConical, path: '/evaluate' },
     { text: 'Review', icon: FileText, path: '/review' },
   ]
-
-  const projectOptions = projects.map(p => ({
-    value: p.project_id,
-    label: p.project_name
-  }))
 
   return (
     <div className="flex h-screen bg-databricks-gray-50">
@@ -45,28 +38,6 @@ export default function Layout({ children }: LayoutProps) {
           <h1 className="text-lg font-semibold text-databricks-gray-900">
             🔍 Retrieval Studio
           </h1>
-        </div>
-
-        {/* Project Selector */}
-        <div className="p-4 border-b border-databricks-gray-200">
-          {isLoading ? (
-            <div className="flex items-center justify-center py-2">
-              <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-databricks-blue"></div>
-            </div>
-          ) : projects.length > 0 ? (
-            <Select
-              value={selectedProjectId}
-              onChange={(e) => setSelectedProjectId(e.target.value)}
-              options={[
-                { value: '', label: 'Select project' },
-                ...projectOptions
-              ]}
-            />
-          ) : (
-            <p className="text-sm text-databricks-gray-500 text-center py-2">
-              No projects yet
-            </p>
-          )}
         </div>
 
         {/* Navigation */}

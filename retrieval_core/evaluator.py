@@ -134,21 +134,45 @@ class RetrievalEvaluator:
         try:
             # Try to get credentials from notebook context first (when running in Databricks)
             try:
-                # Method 1: Get from spark config (most reliable in notebooks)
-                from pyspark.sql import SparkSession
-                spark = SparkSession.builder.getOrCreate()
-                self.api_token = spark.conf.get("spark.databricks.token", None)
-                self.api_url = spark.conf.get("spark.databricks.workspaceUrl", None)
-
-                if self.api_token and self.api_url:
-                    # Ensure URL has https://
-                    if not self.api_url.startswith("http"):
-                        self.api_url = f"https://{self.api_url}"
-                    self.w = None
-                    print(f"✅ Evaluator using spark config for API credentials")
-                    return
+                # Method 1: Get from dbutils (most reliable in Databricks notebooks)
+                import IPython
+                dbutils = IPython.get_ipython().user_ns.get('dbutils')
+                if dbutils:
+                    self.api_token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().getOrElse(None)
+                    self.api_url = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiUrl().getOrElse(None)
+                    
+                    if self.api_token and self.api_url:
+                        # Ensure URL has https://
+                        if not self.api_url.startswith("http"):
+                            self.api_url = f"https://{self.api_url}"
+                        self.w = None
+                        print(f"✅ Evaluator using dbutils for API credentials")
+                        return
             except Exception as e:
-                print(f"Could not get credentials from spark config: {e}")
+                # dbutils not available - try spark config as fallback
+                try:
+                    from pyspark.sql import SparkSession
+                    spark = SparkSession.builder.getOrCreate()
+                    self.api_token = spark.conf.get("spark.databricks.token", None)
+                    self.api_url = spark.conf.get("spark.databricks.workspaceUrl", None)
+
+                    if self.api_token and self.api_url:
+                        # Ensure URL has https://
+                        if not self.api_url.startswith("http"):
+                            self.api_url = f"https://{self.api_url}"
+                        self.w = None
+                        print(f"✅ Evaluator using spark config for API credentials")
+                        return
+                except Exception as e2:
+                    # In Spark Connect, spark.databricks.token is not available - this is expected
+                    # Silently fall through to SDK config method
+                    error_str = str(e2).lower()
+                    if "config_not_available" in error_str or "spark.databricks.token" in error_str:
+                        # Expected in Spark Connect - don't print error
+                        pass
+                    else:
+                        # Unexpected error - log it
+                        print(f"Could not get credentials from spark config: {e2}")
                 pass
 
             # Fall back to SDK config

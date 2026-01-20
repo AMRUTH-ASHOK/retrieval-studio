@@ -25,3 +25,6 @@ numpy>=1.24.0
 
 # OpenAI
 openai>=1.0.0
+
+# Document Processing
+pymupdf>=1.23.0  # PyMuPDF for PDF text extraction

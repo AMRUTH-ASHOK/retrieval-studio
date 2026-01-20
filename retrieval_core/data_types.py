@@ -69,19 +69,43 @@ class PDFDataType(DataTypeHandler):
     
     def load_documents(self, config: Dict[str, Any]) -> List[Document]:
         """Load PDF documents"""
+        import fitz  # PyMuPDF
+
         documents = []
         uploaded_files = config.get("uploaded_files", [])
         extract_images = config.get("extract_images", False)
         ocr_enabled = config.get("ocr_enabled", False)
-        
+
         for file in uploaded_files:
-            # Placeholder for actual PDF parsing
-            # Would use libraries like pymupdf, pdfplumber, pypdf2
+            filename = getattr(file, 'name', 'unknown.pdf')
+
+            # Extract text from PDF
+            text = self._extract_text_from_pdf(file, ocr_enabled)
+
+            # Get page count for metadata
+            try:
+                # Re-read file for page count (file was already read in _extract_text_from_pdf)
+                if hasattr(file, 'seek'):
+                    file.seek(0)  # Reset file pointer if possible
+
+                content = file.read() if hasattr(file, 'read') else file
+                if isinstance(content, str):
+                    content = content.encode('utf-8')
+
+                pdf_doc = fitz.open(stream=content, filetype="pdf")
+                page_count = pdf_doc.page_count
+                pdf_doc.close()
+            except Exception:
+                page_count = 0
+
             doc = Document(
                 doc_id=str(uuid.uuid4()),
-                doc_name=file.name if hasattr(file, 'name') else str(file),
-                text=self._extract_text_from_pdf(file, ocr_enabled),
+                doc_name=filename,
+                text=text,
                 metadata={
+                    "source_type": "pdf",
+                    "filename": filename,
+                    "page_count": page_count,
                     "extract_images": extract_images,
                     "ocr_enabled": ocr_enabled,
                     "file_size": getattr(file, 'size', 0)
@@ -89,13 +113,49 @@ class PDFDataType(DataTypeHandler):
                 data_type="pdf"
             )
             documents.append(doc)
-        
+
         return documents
     
     def _extract_text_from_pdf(self, file, ocr_enabled: bool) -> str:
-        """Extract text from PDF file"""
-        # Placeholder - would implement actual PDF parsing
-        return f"[PDF Content from {getattr(file, 'name', 'file')}]"
+        """Extract text from PDF file using PyMuPDF"""
+        try:
+            import fitz  # PyMuPDF
+
+            # Read file content
+            content = file.read() if hasattr(file, 'read') else file
+            if isinstance(content, str):
+                content = content.encode('utf-8')
+
+            # Open PDF from bytes
+            pdf_document = fitz.open(stream=content, filetype="pdf")
+
+            # Extract text from all pages
+            text_parts = []
+            for page_num in range(pdf_document.page_count):
+                page = pdf_document[page_num]
+                page_text = page.get_text()
+
+                if page_text.strip():
+                    text_parts.append(page_text)
+
+            pdf_document.close()
+
+            # Combine all pages with page separators
+            full_text = "\n\n--- Page Break ---\n\n".join(text_parts)
+
+            if not full_text.strip():
+                # If no text extracted, might be a scanned PDF
+                if ocr_enabled:
+                    return f"[OCR not yet implemented for {getattr(file, 'name', 'file')}]"
+                else:
+                    return f"[No text found in {getattr(file, 'name', 'file')} - may be scanned. Enable OCR if needed.]"
+
+            return full_text
+
+        except Exception as e:
+            # Handle errors gracefully
+            filename = getattr(file, 'name', 'file')
+            return f"[Error extracting PDF content from {filename}: {str(e)}]"
     
     def get_compatible_strategies(self) -> List[str]:
         return ["baseline", "structured", "parent_child", "semantic"]
@@ -122,18 +182,48 @@ class DeltaTableDataType(DataTypeHandler):
         }
     
     def load_documents(self, config: Dict[str, Any]) -> List[Document]:
-        """Load documents from Delta Table"""
+        """Load documents from Delta Table(s)
+
+        Supports two formats:
+        1. Single table: {"table_name": "...", "text_column": "...", ...}
+        2. Multiple tables: {"tables": [{"table_name": "...", "text_column": "...", ...}, ...]}
+        """
         from utils.query_builder import escape_identifier, sanitize_string
-        
+
+        sql_connector = config.get("sql_connector")
+
+        if not sql_connector:
+            raise ValueError("SQL connector required for Delta Table data type")
+
+        documents = []
+
+        # Check if using new array format
+        tables = config.get("tables", [])
+
+        if tables:
+            # New format: multiple tables
+            for table_config in tables:
+                table_docs = self._load_from_table(sql_connector, table_config)
+                documents.extend(table_docs)
+        else:
+            # Old format: single table (backward compatibility)
+            table_docs = self._load_from_table(sql_connector, config)
+            documents.extend(table_docs)
+
+        return documents
+
+    def _load_from_table(self, sql_connector, config: Dict[str, Any]) -> List[Document]:
+        """Load documents from a single Delta Table"""
+        from utils.query_builder import escape_identifier, sanitize_string
+
         table_name = config.get("table_name", "")
         text_column = config.get("text_column", "text")
         id_column = config.get("id_column")
         filter_condition = config.get("filter_condition")
-        sql_connector = config.get("sql_connector")
-        
-        if not sql_connector:
-            raise ValueError("SQL connector required for Delta Table data type")
-        
+
+        if not table_name:
+            return []
+
         # Build query
         table_parts = table_name.split(".")
         if len(table_parts) == 3:
@@ -141,27 +231,27 @@ class DeltaTableDataType(DataTypeHandler):
             full_table = f"{escape_identifier(catalog)}.{escape_identifier(schema)}.{escape_identifier(table)}"
         else:
             full_table = escape_identifier(table_name)
-        
+
         id_col = escape_identifier(id_column) if id_column else "uuid()"
         text_col = escape_identifier(text_column)
-        
+
         query = f"SELECT {id_col} as id, {text_col} as text FROM {full_table}"
         if filter_condition:
             query += f" WHERE {filter_condition}"
-        
+
         results = sql_connector.execute(query)
-        
+
         documents = []
         for row in results:
             doc = Document(
                 doc_id=str(row.get('id', uuid.uuid4())),
-                doc_name=f"row_{row.get('id', uuid.uuid4())}",
+                doc_name=f"{table_name}_row_{row.get('id', uuid.uuid4())}",
                 text=str(row.get('text', '')),
-                metadata={"source_table": table_name},
+                metadata={"source_table": table_name, "source_type": "delta_table"},
                 data_type="delta_table"
             )
             documents.append(doc)
-        
+
         return documents
     
     def get_compatible_strategies(self) -> List[str]:
@@ -189,14 +279,180 @@ class UCVolumeDataType(DataTypeHandler):
     
     def load_documents(self, config: Dict[str, Any]) -> List[Document]:
         """Load documents from UC Volume"""
+        import fnmatch
+
         volume_path = config.get("volume_path", "")
         file_pattern = config.get("file_pattern", "*.txt")
         recursive = config.get("recursive", False)
-        
-        # Placeholder for actual implementation
-        # Would use dbutils.fs or Volume APIs
+
+        if not volume_path:
+            raise ValueError("volume_path is required for UC Volume data type")
+
         documents = []
-        return documents
+
+        try:
+            # Import dbutils for Databricks file system access
+            from databricks.sdk.runtime import dbutils
+
+            # List files in the volume
+            files_to_process = []
+
+            if recursive:
+                files_to_process = self._list_files_recursive(dbutils, volume_path, file_pattern)
+            else:
+                try:
+                    all_files = dbutils.fs.ls(volume_path)
+                    files_to_process = [
+                        f.path for f in all_files
+                        if not f.isDir() and fnmatch.fnmatch(f.name, file_pattern)
+                    ]
+                except Exception as e:
+                    raise ValueError(f"Failed to list files in volume path '{volume_path}': {str(e)}")
+
+            # Process each file
+            for file_path in files_to_process:
+                try:
+                    docs = self._load_file_from_volume(dbutils, file_path, config)
+                    if docs:
+                        # docs can be a single document or a list
+                        if isinstance(docs, list):
+                            documents.extend(docs)
+                        else:
+                            documents.append(docs)
+                except Exception as e:
+                    print(f"[WARNING] Failed to load file {file_path}: {str(e)}")
+                    continue
+
+            return documents
+
+        except ImportError:
+            raise ValueError("dbutils not available - UC Volume access requires Databricks runtime")
+        except Exception as e:
+            raise ValueError(f"Failed to load documents from UC Volume: {str(e)}")
+
+    def _list_files_recursive(self, dbutils, path: str, pattern: str) -> List[str]:
+        """Recursively list files matching pattern"""
+        import fnmatch
+
+        files = []
+
+        try:
+            items = dbutils.fs.ls(path)
+
+            for item in items:
+                if item.isDir():
+                    # Recursively process subdirectories
+                    files.extend(self._list_files_recursive(dbutils, item.path, pattern))
+                else:
+                    # Check if file matches pattern
+                    if fnmatch.fnmatch(item.name, pattern):
+                        files.append(item.path)
+
+        except Exception as e:
+            print(f"[WARNING] Failed to list directory {path}: {str(e)}")
+
+        return files
+
+    def _load_file_from_volume(self, dbutils, file_path: str, config: Dict[str, Any]) -> List[Document]:
+        """Load a single file from UC Volume and route to appropriate handler"""
+        import os
+
+        filename = os.path.basename(file_path)
+        file_ext = os.path.splitext(filename)[1].lower()
+
+        # Read file content (limit to 10MB)
+        try:
+            content = dbutils.fs.head(file_path, maxBytes=10*1024*1024)
+        except Exception as e:
+            print(f"[ERROR] Failed to read file {file_path}: {str(e)}")
+            return []
+
+        # Route based on file extension
+        if file_ext == '.txt':
+            # Plain text file
+            doc = Document(
+                doc_id=str(uuid.uuid4()),
+                doc_name=filename,
+                text=content,
+                metadata={
+                    "source_type": "uc_volume",
+                    "file_path": file_path,
+                    "file_extension": file_ext
+                },
+                data_type="uc_volume"
+            )
+            return [doc]
+
+        elif file_ext == '.pdf':
+            # PDF file - use PDF handler
+            pdf_handler = PDFDataType()
+            # Create a file-like object from content
+            import io
+            file_obj = io.BytesIO(content.encode('utf-8') if isinstance(content, str) else content)
+            file_obj.name = filename
+
+            pdf_docs = pdf_handler.load_documents({
+                "uploaded_files": [file_obj],
+                "extract_images": config.get("extract_images", False),
+                "ocr_enabled": config.get("ocr_enabled", False)
+            })
+
+            # Update metadata to include UC Volume source
+            for doc in pdf_docs:
+                doc.metadata["source_type"] = "uc_volume"
+                doc.metadata["file_path"] = file_path
+                doc.data_type = "uc_volume"
+
+            return pdf_docs
+
+        elif file_ext == '.csv':
+            # CSV file - use CSV handler
+            csv_handler = CSVDataType()
+            import io
+            file_obj = io.StringIO(content if isinstance(content, str) else content.decode('utf-8'))
+            file_obj.name = filename
+
+            csv_docs = csv_handler.load_documents({
+                "uploaded_files": [file_obj],
+                "text_column": config.get("text_column", "text"),
+                "id_column": config.get("id_column"),
+                "has_header": config.get("has_header", True)
+            })
+
+            # Update metadata
+            for doc in csv_docs:
+                doc.metadata["source_type"] = "uc_volume"
+                doc.metadata["file_path"] = file_path
+                doc.data_type = "uc_volume"
+
+            return csv_docs
+
+        elif file_ext == '.json':
+            # JSON file - use JSON handler
+            json_handler = JSONDataType()
+            import io
+            file_obj = io.StringIO(content if isinstance(content, str) else content.decode('utf-8'))
+            file_obj.name = filename
+
+            json_docs = json_handler.load_documents({
+                "uploaded_files": [file_obj],
+                "text_field": config.get("text_field", "text"),
+                "id_field": config.get("id_field"),
+                "is_array": config.get("is_array", True)
+            })
+
+            # Update metadata
+            for doc in json_docs:
+                doc.metadata["source_type"] = "uc_volume"
+                doc.metadata["file_path"] = file_path
+                doc.data_type = "uc_volume"
+
+            return json_docs
+
+        else:
+            # Unsupported file type - log warning and skip
+            print(f"[WARNING] Unsupported file type: {file_ext} for file {file_path}")
+            return []
     
     def get_compatible_strategies(self) -> List[str]:
         return ["baseline", "structured", "parent_child"]
@@ -221,19 +477,48 @@ class TextDataType(DataTypeHandler):
         }
     
     def load_documents(self, config: Dict[str, Any]) -> List[Document]:
-        """Load plain text document"""
-        text_content = config.get("text_content", "")
-        doc_name = config.get("document_name", "text_document")
-        
-        doc = Document(
-            doc_id=str(uuid.uuid4()),
-            doc_name=doc_name,
-            text=text_content,
-            metadata={},
-            data_type="text"
-        )
-        
-        return [doc]
+        """Load plain text document(s)
+
+        Supports two formats:
+        1. Single text: {"text_content": "...", "document_name": "..."}
+        2. Multiple texts: {"text_entries": [{"text_content": "...", "document_name": "..."}, ...]}
+        """
+        documents = []
+
+        # Check if using new array format
+        text_entries = config.get("text_entries", [])
+
+        if text_entries:
+            # New format: multiple text entries
+            for idx, entry in enumerate(text_entries):
+                text_content = entry.get("text_content", "")
+                doc_name = entry.get("document_name", f"text_document_{idx + 1}")
+
+                if text_content.strip():
+                    doc = Document(
+                        doc_id=str(uuid.uuid4()),
+                        doc_name=doc_name,
+                        text=text_content.strip(),
+                        metadata={"source_type": "text", "entry_index": idx},
+                        data_type="text"
+                    )
+                    documents.append(doc)
+        else:
+            # Old format: single text entry (backward compatibility)
+            text_content = config.get("text_content", "")
+            doc_name = config.get("document_name", "text_document")
+
+            if text_content.strip():
+                doc = Document(
+                    doc_id=str(uuid.uuid4()),
+                    doc_name=doc_name,
+                    text=text_content.strip(),
+                    metadata={"source_type": "text"},
+                    data_type="text"
+                )
+                documents.append(doc)
+
+        return documents
     
     def get_compatible_strategies(self) -> List[str]:
         return ["baseline", "semantic", "sentence", "paragraph"]

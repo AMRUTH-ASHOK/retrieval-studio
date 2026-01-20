@@ -40,6 +40,7 @@ CREATE INDEX idx_builds_project_id ON builds(project_id);
 CREATE INDEX idx_builds_state ON builds(state);
 CREATE INDEX idx_builds_created_at ON builds(created_at DESC);
 CREATE INDEX idx_builds_project_created ON builds(project_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_builds_experiment_id ON builds(experiment_id);
 
 -- Evaluations table (tracks evaluation jobs)
 CREATE TABLE IF NOT EXISTS evaluations (
@@ -117,5 +118,6 @@ COMMENT ON TABLE evaluations IS 'Tracks evaluation job submissions and status';
 COMMENT ON TABLE job_runs IS 'Detailed job execution tracking for status polling';
 
 COMMENT ON COLUMN builds.config IS 'JSONB field storing build configuration (data_type, strategies, etc)';
+COMMENT ON COLUMN builds.experiment_id IS 'MLflow experiment ID where runs for this build are stored';
 COMMENT ON COLUMN evaluations.auto_generate_queries IS 'Whether queries were auto-generated from corpus';
 COMMENT ON COLUMN evaluations.compare_query_types IS 'Whether to compare FULL_TEXT, ANN, HYBRID';
