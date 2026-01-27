@@ -27,6 +27,7 @@ export default function Review() {
   // Selection states
   const [selectedBuildIds, setSelectedBuildIds] = useState<Set<string>>(new Set())
   const [selectedEvalIds, setSelectedEvalIds] = useState<Set<string>>(new Set())
+  const [reviewScope, setReviewScope] = useState<'project' | 'build' | 'evaluation'>('evaluation')
 
   // UI states
   const [isLoadingBuilds, setIsLoadingBuilds] = useState(false)
@@ -59,16 +60,25 @@ export default function Review() {
     }
   }, [selectedProjectId])
 
+  useEffect(() => {
+    setShowResults(false)
+    setError(null)
+    if (reviewScope !== 'evaluation') {
+      setSelectedEvalIds(new Set())
+      setEvaluationsByBuild(new Map())
+    }
+  }, [reviewScope])
+
   // Load evaluations when selected builds change
   useEffect(() => {
-    if (selectedBuildIds.size > 0) {
+    if (reviewScope === 'evaluation' && selectedBuildIds.size > 0) {
       loadEvaluationsForSelectedBuilds()
     } else {
       setEvaluationsByBuild(new Map())
       setSelectedEvalIds(new Set())
       setShowResults(false)
     }
-  }, [selectedBuildIds])
+  }, [selectedBuildIds, reviewScope])
 
   const loadBuilds = async () => {
     if (!selectedProjectId) return
@@ -122,30 +132,25 @@ export default function Review() {
     }
   }
 
-  const loadMetricsForSelectedEvaluations = async () => {
-    if (!selectedProjectId || selectedEvalIds.size === 0) return
+  const loadMetricsForScope = async () => {
+    if (!selectedProjectId) return
+
+    if (reviewScope === 'build' && selectedBuildIds.size === 0) {
+      setError('Select at least one build to review.')
+      setShowResults(false)
+      return
+    }
+
+    if (reviewScope === 'evaluation' && selectedEvalIds.size === 0) {
+      setError('Select at least one evaluation to review.')
+      setShowResults(false)
+      return
+    }
 
     setIsLoadingMetrics(true)
     try {
-      // Get the build IDs for the selected evaluations
-      const selectedBuildIdsForEvals = new Set<string>()
-      selectedEvalIds.forEach(evalId => {
-        // Find which build this evaluation belongs to
-        for (const [buildId, evals] of evaluationsByBuild.entries()) {
-          if (evals.some(e => e.run_id === evalId)) {
-            selectedBuildIdsForEvals.add(buildId)
-            break
-          }
-        }
-      })
-
-      console.log('[loadMetrics] Selected eval IDs:', Array.from(selectedEvalIds))
-      console.log('[loadMetrics] Selected build IDs for evals:', Array.from(selectedBuildIdsForEvals))
-
-      // Load all MLflow runs for the project
       const runsData = await projectsApi.getMLflowRuns(selectedProjectId)
-      
-      // Validate response structure
+
       if (!runsData || !Array.isArray(runsData.runs)) {
         console.error('Invalid MLflow runs response:', runsData)
         setMlflowRuns([])
@@ -153,63 +158,20 @@ export default function Review() {
         return
       }
 
-      console.log('[loadMetrics] Total MLflow runs:', runsData.runs.length)
-      console.log('[loadMetrics] All runs roles:', runsData.runs.map(r => ({ run_id: r.run_id, role: r.role, build_run_id: r.params?.build_run_id || r.tags?.build_run_id })))
+      const evalRuns = runsData.runs.filter((run: MLflowRun) => run && run.role === 'eval_strategy')
+      let filteredRuns = evalRuns
 
-      // Filter to only eval_strategy runs that belong to the selected builds
-      const filteredRuns = runsData.runs.filter((run: MLflowRun) => {
-        try {
-          if (!run) {
-            console.log('[loadMetrics] Skipping null run')
-            return false
-          }
-          
-          if (run.role !== 'eval_strategy') {
-            console.log('[loadMetrics] Skipping non-eval_strategy run:', run.role)
-            return false
-          }
-
-          // Check if this MLflow run belongs to one of our selected builds
+      if (reviewScope === 'build') {
+        filteredRuns = evalRuns.filter(run => {
           const buildRunId = run.params?.build_run_id || run.tags?.build_run_id
-          console.log('[loadMetrics] Checking run:', {
-            run_id: run.run_id,
-            build_run_id: buildRunId,
-            has_build_id: !!buildRunId,
-            in_selected: buildRunId ? selectedBuildIdsForEvals.has(buildRunId) : false,
-            selected_builds: Array.from(selectedBuildIdsForEvals)
-          })
-          
-          if (!buildRunId) {
-            console.log('[loadMetrics] Run has no build_run_id:', run)
-            return false
-          }
-          
-          const matches = selectedBuildIdsForEvals.has(buildRunId)
-          if (matches) {
-            console.log('[loadMetrics] ✅ Run matches:', run.run_id, 'build:', buildRunId)
-          }
-          return matches
-        } catch (e) {
-          console.warn('Error filtering run:', e, run)
-          return false
-        }
-      })
-
-      console.log('Selected eval IDs:', Array.from(selectedEvalIds))
-      console.log('Selected build IDs for evals:', Array.from(selectedBuildIdsForEvals))
-      console.log('Total MLflow runs:', runsData.runs.length)
-      console.log('Filtered MLflow runs:', filteredRuns.length)
-      console.log('Sample run structure:', filteredRuns[0])
-      console.log('Sample run metrics:', filteredRuns[0]?.metrics)
-      console.log('Sample run params:', filteredRuns[0]?.params)
-      console.log('Sample run tags:', filteredRuns[0]?.tags)
-      console.log('All filtered runs:', filteredRuns.map(r => ({
-        run_id: r.run_id,
-        role: r.role,
-        metrics: r.metrics,
-        params: r.params,
-        tags: r.tags
-      })))
+          return buildRunId ? selectedBuildIds.has(buildRunId) : false
+        })
+      } else if (reviewScope === 'evaluation') {
+        filteredRuns = evalRuns.filter(run => {
+          const evalId = run.params?.eval_id || run.tags?.rs_eval_id || run.tags?.eval_id
+          return evalId ? selectedEvalIds.has(evalId) : false
+        })
+      }
 
       setMlflowRuns(filteredRuns)
       setShowResults(true)
@@ -260,17 +222,21 @@ export default function Review() {
   }
 
   const handleReviewClick = () => {
-    loadMetricsForSelectedEvaluations()
+    loadMetricsForScope()
   }
 
   const handleRefresh = () => {
     loadBuilds()
     loadMLflowExperiment()
-    if (selectedBuildIds.size > 0) {
+    if (reviewScope === 'evaluation' && selectedBuildIds.size > 0) {
       loadEvaluationsForSelectedBuilds()
     }
-    if (selectedEvalIds.size > 0) {
-      loadMetricsForSelectedEvaluations()
+    if (reviewScope === 'project') {
+      loadMetricsForScope()
+    } else if (reviewScope === 'build' && selectedBuildIds.size > 0) {
+      loadMetricsForScope()
+    } else if (reviewScope === 'evaluation' && selectedEvalIds.size > 0) {
+      loadMetricsForScope()
     }
   }
 
@@ -372,6 +338,53 @@ export default function Review() {
         </div>
       )}
 
+      {selectedProjectId && (
+        <Card className="mb-6">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-databricks-gray-900">
+                Review Scope
+              </h3>
+              <p className="text-xs text-databricks-gray-600">
+                Choose how to aggregate evaluation runs for this project.
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setReviewScope('project')}
+                className={`px-3 py-2 text-xs font-medium rounded-md transition-colors ${
+                  reviewScope === 'project'
+                    ? 'bg-databricks-blue text-white'
+                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                }`}
+              >
+                Project
+              </button>
+              <button
+                onClick={() => setReviewScope('build')}
+                className={`px-3 py-2 text-xs font-medium rounded-md transition-colors ${
+                  reviewScope === 'build'
+                    ? 'bg-databricks-blue text-white'
+                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                }`}
+              >
+                Build
+              </button>
+              <button
+                onClick={() => setReviewScope('evaluation')}
+                className={`px-3 py-2 text-xs font-medium rounded-md transition-colors ${
+                  reviewScope === 'evaluation'
+                    ? 'bg-databricks-blue text-white'
+                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                }`}
+              >
+                Evaluation
+              </button>
+            </div>
+          </div>
+        </Card>
+      )}
+
       {error && (
         <Card className="mb-6 bg-red-50 border-red-200">
           <div className="p-4">
@@ -412,15 +425,17 @@ export default function Review() {
       )}
 
       {/* Step 1: Select Builds */}
-      <BuildSelector
-        builds={builds}
-        selectedBuildIds={selectedBuildIds}
-        onToggleBuild={handleToggleBuild}
-        isLoading={isLoadingBuilds}
-      />
+      {reviewScope !== 'project' && (
+        <BuildSelector
+          builds={builds}
+          selectedBuildIds={selectedBuildIds}
+          onToggleBuild={handleToggleBuild}
+          isLoading={isLoadingBuilds}
+        />
+      )}
 
       {/* Step 2: Select Evaluations */}
-      {selectedBuildIds.size > 0 && (
+      {reviewScope === 'evaluation' && selectedBuildIds.size > 0 && (
         <EvaluationSelector
           evaluationsByBuild={evaluationsByBuild}
           selectedEvalIds={selectedEvalIds}
@@ -430,7 +445,49 @@ export default function Review() {
       )}
 
       {/* Review Button */}
-      {selectedEvalIds.size > 0 && (
+      {reviewScope === 'project' && selectedProjectId && (
+        <div className="mb-6 flex justify-center">
+          <Button
+            onClick={handleReviewClick}
+            disabled={isLoadingMetrics}
+            className="px-8 py-3 text-base"
+          >
+            {isLoadingMetrics ? (
+              <>
+                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                Loading Metrics...
+              </>
+            ) : (
+              <>
+                🔍 Review Project
+              </>
+            )}
+          </Button>
+        </div>
+      )}
+
+      {reviewScope === 'build' && selectedBuildIds.size > 0 && (
+        <div className="mb-6 flex justify-center">
+          <Button
+            onClick={handleReviewClick}
+            disabled={isLoadingMetrics}
+            className="px-8 py-3 text-base"
+          >
+            {isLoadingMetrics ? (
+              <>
+                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                Loading Metrics...
+              </>
+            ) : (
+              <>
+                🔍 Review Selected ({selectedBuildIds.size} builds)
+              </>
+            )}
+          </Button>
+        </div>
+      )}
+
+      {reviewScope === 'evaluation' && selectedEvalIds.size > 0 && (
         <div className="mb-6 flex justify-center">
           <Button
             onClick={handleReviewClick}

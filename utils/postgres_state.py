@@ -440,7 +440,7 @@ def get_job_run(job_run_id: int) -> Optional[Dict[str, Any]]:
 
 def get_experiment_id_for_project(project_id: str) -> Optional[str]:
     """
-    Get the most recent successful build's experiment_id for a project
+    Get the project's experiment_id
 
     Args:
         project_id: The project UUID
@@ -453,12 +453,9 @@ def get_experiment_id_for_project(project_id: str) -> Optional[str]:
     result = connector.execute(
         """
         SELECT experiment_id
-        FROM builds
+        FROM projects
         WHERE project_id = %s
-          AND state = 'SUCCESS'
           AND experiment_id IS NOT NULL
-        ORDER BY created_at DESC
-        LIMIT 1
         """,
         (project_id,),
         fetch="one"

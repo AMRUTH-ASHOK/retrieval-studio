@@ -11,7 +11,7 @@ from backend.config import settings
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from utils.postgres_state import get_all_projects, get_project, create_project, delete_project
+from utils.postgres_state import get_all_projects, get_project, create_project, delete_project, update_project
 
 router = APIRouter()
 
@@ -116,7 +116,7 @@ async def get_mlflow_experiment_url(project_id: str, sql_connector=Depends(get_u
         import mlflow
         mlflow.set_tracking_uri("databricks")
 
-        # Get experiment_id from builds table
+        # Get experiment_id from projects table
         from utils.postgres_state import get_experiment_id_for_project
 
         experiment_id = get_experiment_id_for_project(project_id)
@@ -126,15 +126,13 @@ async def get_mlflow_experiment_url(project_id: str, sql_connector=Depends(get_u
         experiment_name = None
 
         if experiment_id:
-            # Use stored experiment ID
             print(f"[INFO] Using stored experiment_id: {experiment_id}")
-
             try:
                 experiment = client.get_experiment(experiment_id)
                 experiment_name = experiment.name
             except Exception as e:
                 print(f"[WARNING] Failed to get experiment by ID: {e}")
-                # Fall back to name generation
+                experiment = None
 
         if not experiment:
             # Fallback to name-based lookup
@@ -161,6 +159,7 @@ async def get_mlflow_experiment_url(project_id: str, sql_connector=Depends(get_u
             try:
                 experiment_id = mlflow.create_experiment(experiment_name)
                 print(f"[INFO] Created MLflow experiment: {experiment_name} with ID: {experiment_id}")
+                experiment = client.get_experiment(experiment_id)
             except Exception as create_error:
                 # Experiment might have been created by another process - try to get it again
                 print(f"[WARNING] Failed to create experiment, attempting to retrieve: {create_error}")
@@ -179,6 +178,12 @@ async def get_mlflow_experiment_url(project_id: str, sql_connector=Depends(get_u
                     }
         else:
             experiment_id = experiment.experiment_id
+
+        if experiment_id:
+            try:
+                update_project(project_id, experiment_id=experiment_id)
+            except Exception as e:
+                print(f"[WARNING] Failed to update project experiment_id: {e}")
 
         # Construct direct MLflow experiment URL with /runs path and org_id
         # Format: https://<host>/ml/experiments/<experiment_id>/runs?o=<org_id>
@@ -227,7 +232,7 @@ async def get_mlflow_runs(project_id: str, sql_connector=Depends(get_user_sql_co
         # Initialize MLflow client
         client = MlflowClient()
 
-        # Get experiment_id from builds table
+        # Get experiment_id from projects table
         from utils.postgres_state import get_experiment_id_for_project
 
         experiment_id = get_experiment_id_for_project(project_id)
@@ -238,18 +243,16 @@ async def get_mlflow_runs(project_id: str, sql_connector=Depends(get_user_sql_co
         experiment_name = None
         
         if experiment_id:
-            # Found stored experiment ID - use it directly
             print(f"[DEBUG] Found stored experiment_id: {experiment_id}")
-
             try:
                 experiment = client.get_experiment(experiment_id)
                 experiment_name = experiment.name
                 print(f"[DEBUG] ✓ Retrieved experiment by ID: {experiment_name}")
             except Exception as e:
                 print(f"[WARNING] Failed to get experiment by stored ID {experiment_id}: {e}")
-                # Will fall back to name-based lookup below
+                experiment = None
         else:
-            print(f"[DEBUG] No stored experiment_id found in builds table")
+            print(f"[DEBUG] No stored experiment_id found in projects table")
 
         # Fallback: Name-based lookup (for backward compatibility)
         if not experiment:
@@ -264,27 +267,37 @@ async def get_mlflow_runs(project_id: str, sql_connector=Depends(get_user_sql_co
             except Exception as e:
                 print(f"[ERROR] Failed to get experiment by name: {e}")
 
-        # If still not found, list available experiments for debugging
+        # If still not found, attempt to create the experiment
         if not experiment:
             print(f"[ERROR] Experiment not found by either ID or name")
-            print(f"[DEBUG] Listing all available experiments:")
-
             try:
-                all_experiments = client.search_experiments()
-                for exp in all_experiments[:20]:  # First 20
-                    print(f"  - Name: {exp.name}, ID: {exp.experiment_id}, Lifecycle: {exp.lifecycle_stage}")
-            except Exception as list_error:
-                print(f"[ERROR] Failed to list experiments: {list_error}")
+                experiment_id = mlflow.create_experiment(experiment_name)
+                experiment = client.get_experiment(experiment_id)
+            except Exception as create_error:
+                print(f"[ERROR] Failed to create experiment: {create_error}")
+                print(f"[DEBUG] Listing all available experiments:")
 
-            return {
-                "experiment_name": experiment_name or "unknown",
-                "runs": [],
-                "debug_info": "Experiment not found. Check logs for available experiments."
-            }
+                try:
+                    all_experiments = client.search_experiments()
+                    for exp in all_experiments[:20]:  # First 20
+                        print(f"  - Name: {exp.name}, ID: {exp.experiment_id}, Lifecycle: {exp.lifecycle_stage}")
+                except Exception as list_error:
+                    print(f"[ERROR] Failed to list experiments: {list_error}")
+
+                return {
+                    "experiment_name": experiment_name or "unknown",
+                    "runs": [],
+                    "debug_info": "Experiment not found. Check logs for available experiments."
+                }
 
         # Ensure experiment_name is set from experiment object
         if not experiment_name:
             experiment_name = experiment.name
+
+        try:
+            update_project(project_id, experiment_id=experiment.experiment_id)
+        except Exception as e:
+            print(f"[WARNING] Failed to update project experiment_id: {e}")
             
         print(f"[DEBUG] Using experiment: {experiment_name} (ID: {experiment.experiment_id})")
 

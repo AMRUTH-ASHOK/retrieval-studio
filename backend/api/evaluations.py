@@ -34,6 +34,7 @@ async def create_evaluation(
         top_k = eval_request.top_k or 10
         dataset_type = eval_request.dataset_type or "delta_table"
         auto_generate = eval_request.auto_generate_queries or False
+        build_parent_run_id = build_run.get("build_parent_run_id")
         
         # Validate required parameters based on mode
         if auto_generate:
@@ -84,6 +85,9 @@ async def create_evaluation(
             if not eval_request.queries_table:
                 raise HTTPException(status_code=400, detail="queries_table is required when auto_generate_queries is false")
         
+        # Create evaluation record ID before submission so it can be logged in MLflow
+        eval_id = str(uuid.uuid4())
+
         # Use the unified eval_notebook (now includes all features)
         notebook_path = settings.EVAL_NOTEBOOK_PATH
 
@@ -92,6 +96,8 @@ async def create_evaluation(
             w=w,
             notebook_path=notebook_path,
             build_run_id=eval_request.run_id,
+            eval_id=eval_id,
+            build_parent_run_id=build_parent_run_id,
             queries_table=eval_request.queries_table,
             corpus_table=eval_request.corpus_table,
             project_name=project_name,
@@ -116,8 +122,6 @@ async def create_evaluation(
         # Create evaluation record in Postgres
         from utils.postgres_state import create_evaluation, update_evaluation_state
         import datetime
-        eval_id = str(uuid.uuid4())
-
         evaluation = create_evaluation(
             eval_id=eval_id,
             run_id=eval_request.run_id,

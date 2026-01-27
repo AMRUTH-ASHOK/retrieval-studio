@@ -493,7 +493,7 @@ export default function Evaluate() {
               label="LLM Judge Endpoint (Optional)"
               value={judgeModelEndpoint}
               onChange={(e) => setJudgeModelEndpoint(e.target.value)}
-              placeholder="e.g., databricks-meta-llama-3-1-70b-instruct"
+              placeholder="e.g., databricks-claude-sonnet-4-5"
               helperText="LLM endpoint for relevance scoring without ground truth labels. Leave empty to use ground truth if available."
             />
           </div>

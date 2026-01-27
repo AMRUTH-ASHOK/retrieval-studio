@@ -81,6 +81,8 @@ def submit_eval_job(
     w: WorkspaceClient,
     notebook_path: str,
     build_run_id: str,
+    eval_id: str,
+    build_parent_run_id: str,
     project_name: str,
     catalog: str,
     schema: str,
@@ -107,6 +109,8 @@ def submit_eval_job(
         notebook_path: Path to eval notebook
         build_run_id: Build run identifier
         queries_table: Full table name (catalog.schema.table) containing evaluation queries
+        eval_id: Evaluation identifier
+        build_parent_run_id: MLflow parent run ID for the build
         project_name: Project name
         catalog: Catalog name
         schema: Schema name
@@ -133,6 +137,11 @@ def submit_eval_job(
             "query_style": query_style,
             "compare_query_types": str(compare_query_types).lower(),
         }
+
+        if eval_id:
+            base_parameters["eval_id"] = str(eval_id)
+        if build_parent_run_id:
+            base_parameters["build_parent_run_id"] = str(build_parent_run_id)
         
         # Add optional parameters
         if queries_table:

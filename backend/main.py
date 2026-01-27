@@ -111,6 +111,7 @@ async def create_build_job_no_trailing_slash(
         config["catalog"] = settings.CATALOG
         config["schema"] = settings.SCHEMA
         config["project_name"] = project["project_name"]
+        config["project_id"] = build_request.project_id
         print(f"[DEBUG MAIN] Config prepared")
 
         # Create run record first - generate UUID
@@ -235,6 +236,9 @@ async def create_evaluation_no_trailing_slash(
             if not eval_request.queries_table:
                 raise HTTPException(status_code=400, detail="queries_table is required when auto_generate_queries is false")
 
+        build_parent_run_id = build_run.get("build_parent_run_id")
+        eval_id = str(uuid.uuid4())
+
         # Use the unified eval_notebook (now includes all features)
         notebook_path = settings.EVAL_NOTEBOOK_PATH
 
@@ -243,6 +247,8 @@ async def create_evaluation_no_trailing_slash(
             w=w,
             notebook_path=notebook_path,
             build_run_id=eval_request.run_id,
+            eval_id=eval_id,
+            build_parent_run_id=build_parent_run_id,
             queries_table=eval_request.queries_table,
             corpus_table=eval_request.corpus_table,
             project_name=project_name,
@@ -263,8 +269,6 @@ async def create_evaluation_no_trailing_slash(
 
         # Create evaluation record in Postgres
         from utils.postgres_state import create_evaluation, update_evaluation_state
-        eval_id = str(uuid.uuid4())
-
         evaluation = create_evaluation(
             eval_id=eval_id,
             run_id=eval_request.run_id,

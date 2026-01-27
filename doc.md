@@ -188,7 +188,7 @@ Let the system generate evaluation queries automatically from your documents.
 **Judge Model Endpoint** (optional):
 - If you DON'T have ground truth labels, specify an LLM judge endpoint
 - The LLM will score relevance of retrieved chunks (0-3 scale)
-- Example: `databricks-meta-llama-3-1-70b-instruct`
+- Example: `databricks-claude-sonnet-4-5`
 
 **Compare Query Types** (optional):
 - Test different Vector Search modes:

@@ -45,6 +45,7 @@ async def create_build_job(
         config["catalog"] = settings.CATALOG
         config["schema"] = settings.SCHEMA
         config["project_name"] = project["project_name"]
+        config["project_id"] = build_request.project_id
         print(f"[DEBUG] Config prepared: {list(config.keys())}")
 
         # Create run record first - generate UUID

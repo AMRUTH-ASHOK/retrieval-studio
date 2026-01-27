@@ -104,7 +104,7 @@ export function aggregateByBuild(mlflowRuns: MLflowRun[]): BuildMetrics[] {
       build_run_id: buildRunId,
       build_name: `Build ${buildRunId.substring(0, 8)}`,
       metrics: avgMetrics,
-      strategy_count: new Set(runs.map(r => r.tags?.strategy || r.params?.strategy)).size
+      strategy_count: new Set(runs.map(r => r.tags?.strategy || r.params?.strategy_name || r.params?.strategy)).size
     })
   })
   
@@ -130,7 +130,7 @@ export function aggregateByStrategy(mlflowRuns: MLflowRun[]): StrategyMetrics[] 
 
   evalRuns.forEach(run => {
     if (!run) return
-    const strategy = run.tags?.strategy || run.params?.strategy || 'unknown'
+    const strategy = run.tags?.strategy || run.params?.strategy_name || run.params?.strategy || 'unknown'
     if (!strategyMap.has(strategy)) {
       strategyMap.set(strategy, [])
     }
@@ -171,7 +171,7 @@ export function aggregateByEvaluation(mlflowRuns: MLflowRun[]): EvaluationMetric
       eval_run_id: run.run_id || 'unknown',
       eval_name: run.run_name || 'Unnamed Run',
       build_run_id: run.params?.build_run_id || run.tags?.build_run_id || 'unknown',
-      strategy: run.tags?.strategy || run.params?.strategy || 'unknown',
+      strategy: run.tags?.strategy || run.params?.strategy_name || run.params?.strategy || 'unknown',
       query_type: run.tags?.query_type || run.params?.query_type || 'unknown',
       metrics: (run.metrics || {}) as AggregatedMetrics
     }

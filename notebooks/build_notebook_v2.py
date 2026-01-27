@@ -98,6 +98,7 @@ config_json = dbutils.widgets.get("config") or "{}"
 config = json.loads(config_json)
 
 project_name = config.get("project_name", "default")
+project_id = config.get("project_id")
 data_type = config.get("data_type", "pdf")
 data_config = config.get("data_config", {})
 strategies_config = config.get("strategies", {})
@@ -175,7 +176,7 @@ print(f"[INFO]   - Artifact Location: {experiment.artifact_location}")
 
 # Store experiment ID in database for accurate MLflow lookups
 try:
-    from utils.postgres_state import update_build_state
+    from utils.postgres_state import update_build_state, update_project
 
     update_build_state(
         run_id=run_id,
@@ -184,6 +185,9 @@ try:
     )
 
     print(f"[INFO] ✓ Stored experiment_id={experiment.experiment_id} in builds table for run_id={run_id}")
+    if project_id:
+        update_project(project_id, experiment_id=experiment.experiment_id)
+        print(f"[INFO] ✓ Stored experiment_id={experiment.experiment_id} in projects table for project_id={project_id}")
 
 except Exception as e:
     # Log error but don't fail the build - experiment_id is for convenience
@@ -198,10 +202,18 @@ with mlflow.start_run(run_name=f"build_{run_id[:8]}") as parent_run:
     mlflow.set_tag("rs_role", "build_parent")
     mlflow.log_param("build_run_id", str(run_id))
     mlflow.log_param("project_name", project_name)
+    if project_id:
+        mlflow.log_param("project_id", project_id)
     mlflow.log_param("data_type", data_type)
     mlflow.log_param("num_documents", str(len(documents)))
     mlflow.log_param("strategies", json.dumps(list(strategies_config.keys())))
     mlflow.log_dict(config, "build_config.json")
+    try:
+        from utils.postgres_state import update_build_state
+        update_build_state(run_id=run_id, build_parent_run_id=parent_run.info.run_id)
+        print(f"[INFO] ✓ Stored build_parent_run_id={parent_run.info.run_id} in builds table for run_id={run_id}")
+    except Exception as e:
+        print(f"[WARNING] Failed to store build_parent_run_id for run_id={run_id}: {e}")
 
     for strategy_name, strategy_params in strategies_config.items():
         with mlflow.start_run(run_name=f"build_{strategy_name}", nested=True) as child_run:

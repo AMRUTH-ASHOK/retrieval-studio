@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS projects (
     db_schema VARCHAR(100),
     vs_endpoint_name VARCHAR(255),
     embedding_model_endpoint VARCHAR(255),
+    experiment_id VARCHAR(100),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     created_by VARCHAR(255)
@@ -23,6 +24,7 @@ CREATE TABLE IF NOT EXISTS builds (
     project_id VARCHAR(50) NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
     project_name VARCHAR(255) NOT NULL,
     experiment_id VARCHAR(100),
+    build_parent_run_id VARCHAR(50),
     state VARCHAR(20) NOT NULL DEFAULT 'PENDING',
     job_id BIGINT,
     job_run_id BIGINT,

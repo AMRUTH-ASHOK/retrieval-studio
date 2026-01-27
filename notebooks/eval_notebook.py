@@ -14,6 +14,8 @@
 
 # COMMAND ----------
 dbutils.widgets.text("build_run_id", "")
+dbutils.widgets.text("eval_id", "")
+dbutils.widgets.text("build_parent_run_id", "")
 dbutils.widgets.text("project_name", "default")
 dbutils.widgets.text("corpus_table", "")  # Optional: for auto query generation
 dbutils.widgets.text("queries_table", "")  # Optional: for manual queries
@@ -25,7 +27,7 @@ dbutils.widgets.text("auto_generate_queries", "false")  # Set to "true" for auto
 dbutils.widgets.text("num_queries", "50")  # Number of queries to generate
 dbutils.widgets.text("query_style", "keyword")  # keyword, natural, or mixed
 dbutils.widgets.text("compare_query_types", "false")  # Set to "true" to compare query types
-dbutils.widgets.text("judge_model_endpoint", "databricks-meta-llama-3-1-70b-instruct")
+dbutils.widgets.text("judge_model_endpoint", "databricks-claude-sonnet-4-5")
 dbutils.widgets.text("enable_rich_analytics", "false")  # Set to "false" to skip rich analytics section
 
 # COMMAND ----------
@@ -89,6 +91,8 @@ from utils.vs_utils import query_index
 
 # COMMAND ----------
 build_run_id = dbutils.widgets.get("build_run_id")
+eval_id = dbutils.widgets.get("eval_id") or str(uuid.uuid4())
+build_parent_run_id = dbutils.widgets.get("build_parent_run_id") or ""
 project_name = dbutils.widgets.get("project_name") or "default"
 auto_generate = dbutils.widgets.get("auto_generate_queries").lower() == "true"
 compare_types = dbutils.widgets.get("compare_query_types").lower() == "true"
@@ -183,6 +187,21 @@ experiment_name = core_config.get_experiment_name(project_name)
 exp = mlflow.set_experiment(experiment_name)
 print(f"MLflow experiment: {experiment_name} (ID: {exp.experiment_id})")
 
+if not build_parent_run_id:
+    try:
+        parent_runs = mlflow.search_runs(
+            experiment_ids=[exp.experiment_id],
+            filter_string=f"params.build_run_id = '{build_run_id}' AND tags.rs_role = 'build_parent'",
+            max_results=1,
+        )
+        if not parent_runs.empty:
+            build_parent_run_id = parent_runs.iloc[0]["run_id"]
+            print(f"Resolved build_parent_run_id: {build_parent_run_id}")
+        else:
+            print(f"[WARNING] No build_parent_run_id found for build_run_id={build_run_id}")
+    except Exception as e:
+        print(f"[WARNING] Failed to resolve build_parent_run_id: {e}")
+
 build_child_runs = mlflow.search_runs(
     experiment_ids=[exp.experiment_id],
     filter_string=f"params.build_run_id = '{build_run_id}' AND tags.rs_role = 'build_strategy'",
@@ -238,6 +257,16 @@ except Exception as e:
 # MAGIC ## Run Evaluation
 
 # COMMAND ----------
+def start_eval_parent_run(run_name: str, parent_run_id: str):
+    if parent_run_id:
+        try:
+            return mlflow.start_run(run_name=run_name, nested=True, parent_run_id=parent_run_id)
+        except TypeError:
+            run = mlflow.start_run(run_name=run_name)
+            mlflow.set_tag("mlflow.parentRunId", parent_run_id)
+            return run
+    return mlflow.start_run(run_name=run_name)
+
 # Determine query types to test
 if compare_types:
     query_types = ["FULL_TEXT", "ANN", "HYBRID"]
@@ -249,10 +278,16 @@ else:
 all_rows = []
 strategy_results = {}  # Store results for analysis
 
-with mlflow.start_run(run_name=f"eval_{build_run_id[:8]}") as eval_parent:
+metric_k_values = sorted({k for k in [5, 10, top_k] if k <= top_k})
+
+with start_eval_parent_run(run_name=f"eval_{build_run_id[:8]}", parent_run_id=build_parent_run_id) as eval_parent:
     mlflow.set_tag("rs_role", "eval_parent")
     mlflow.log_param("build_run_id", build_run_id)
+    if build_parent_run_id:
+        mlflow.log_param("build_parent_run_id", build_parent_run_id)
     mlflow.log_param("project_name", project_name)
+    mlflow.log_param("eval_id", eval_id)
+    mlflow.set_tag("rs_eval_id", eval_id)
     mlflow.log_param("top_k", str(top_k))
     mlflow.log_param("auto_generate_queries", str(auto_generate))
     mlflow.log_param("compare_query_types", str(compare_types))
@@ -277,13 +312,22 @@ with mlflow.start_run(run_name=f"eval_{build_run_id[:8]}") as eval_parent:
             with mlflow.start_run(run_name=f"eval_{strategy_name}_{query_type}", nested=True) as eval_child:
                 mlflow.set_tag("rs_role", "eval_strategy")
                 mlflow.log_param("build_run_id", build_run_id)
+                if build_parent_run_id:
+                    mlflow.log_param("build_parent_run_id", build_parent_run_id)
+                mlflow.log_param("eval_id", eval_id)
+                mlflow.set_tag("rs_eval_id", eval_id)
                 mlflow.log_param("build_child_run_id", build_child_run_id)
                 mlflow.log_param("strategy_name", strategy_name)
                 mlflow.log_param("query_type", query_type)
                 mlflow.log_param("vs_endpoint", vs_endpoint)
                 mlflow.log_param("vs_index_name", index_name)
+                mlflow.set_tag("strategy", strategy_name)
+                mlflow.set_tag("query_type", query_type)
 
-                recalls, ndcgs, relevances, latencies = [], [], [], []
+                recalls_by_k = {k: [] for k in metric_k_values}
+                ndcgs_by_k = {k: [] for k in metric_k_values}
+                relevances_by_k = {k: [] for k in metric_k_values}
+                latencies = []
 
                 for i, qr in enumerate(query_rows):
                     qtext = qr["query_text"]
@@ -329,10 +373,10 @@ with mlflow.start_run(run_name=f"eval_{build_run_id[:8]}") as eval_parent:
                     try:
                         if expected_ids:
                             # Use labeled metrics if ground truth available
-                            metrics = evaluator.compute_labeled_metrics(qtext, retrieved, expected_ids, k_values=[top_k])
+                            metrics = evaluator.compute_labeled_metrics(qtext, retrieved, expected_ids, k_values=metric_k_values)
                         else:
                             # Use LLM judge for scoring
-                            metrics = evaluator.compute_judge_metrics(qtext, retrieved, k_values=[top_k])
+                            metrics = evaluator.compute_judge_metrics(qtext, retrieved, k_values=metric_k_values)
                         
                         # Ensure metrics is a dict
                         if not isinstance(metrics, dict):
@@ -351,32 +395,31 @@ with mlflow.start_run(run_name=f"eval_{build_run_id[:8]}") as eval_parent:
                         print(f"  [DEBUG] Retrieved chunks: {len(retrieved)}")
 
                     # Extract key metrics - handle both labeled and judge metrics
-                    recall_key = f"recall_at_{top_k}"
-                    ndcg_key = f"ndcg_at_{top_k}"
-                    relevance_key = f"avg_relevance_at_{top_k}"
-                    judge_key = f"judge_score_at_{top_k}"
+                    for k in metric_k_values:
+                        recall_key = f"recall_at_{k}"
+                        ndcg_key = f"ndcg_at_{k}"
+                        relevance_key = f"avg_relevance_at_{k}"
+                        judge_key = f"judge_score_at_{k}"
 
-                    # For labeled metrics (with ground truth)
-                    if recall_key in metrics:
-                        recalls.append(float(metrics[recall_key]))
-                    if ndcg_key in metrics:
-                        ndcgs.append(float(metrics[ndcg_key]))
-                    
-                    # For judge metrics (without ground truth)
-                    if relevance_key in metrics:
-                        relevances.append(float(metrics[relevance_key]))
-                    elif judge_key in metrics:
-                        # Use judge_score as relevance if avg_relevance not available
-                        relevances.append(float(metrics[judge_key]))
+                        if recall_key in metrics:
+                            recalls_by_k[k].append(float(metrics[recall_key]))
+                        if ndcg_key in metrics:
+                            ndcgs_by_k[k].append(float(metrics[ndcg_key]))
+
+                        if relevance_key in metrics:
+                            relevances_by_k[k].append(float(metrics[relevance_key]))
+                        elif judge_key in metrics:
+                            # Use judge_score as relevance if avg_relevance not available
+                            relevances_by_k[k].append(float(metrics[judge_key]))
                     
                     # Always append latency
                     latencies.append(latency_ms)
                     
                     # Debug: Print extraction status for first query
                     if i == 0:
-                        print(f"  [DEBUG] Recalls list length: {len(recalls)}")
-                        print(f"  [DEBUG] NDCGs list length: {len(ndcgs)}")
-                        print(f"  [DEBUG] Relevances list length: {len(relevances)}")
+                        print(f"  [DEBUG] Recalls list lengths: { {k: len(v) for k, v in recalls_by_k.items()} }")
+                        print(f"  [DEBUG] NDCGs list lengths: { {k: len(v) for k, v in ndcgs_by_k.items()} }")
+                        print(f"  [DEBUG] Relevances list lengths: { {k: len(v) for k, v in relevances_by_k.items()} }")
                         print(f"  [DEBUG] Latencies list length: {len(latencies)}")
 
                     # Store row
@@ -403,9 +446,9 @@ with mlflow.start_run(run_name=f"eval_{build_run_id[:8]}") as eval_parent:
                 
                 # Debug: Print list statuses before logging
                 print(f"\n  [DEBUG] Before MLflow logging:")
-                print(f"    Recalls: {len(recalls)} items")
-                print(f"    NDCGs: {len(ndcgs)} items")
-                print(f"    Relevances: {len(relevances)} items")
+                print(f"    Recalls: { {k: len(v) for k, v in recalls_by_k.items()} }")
+                print(f"    NDCGs: { {k: len(v) for k, v in ndcgs_by_k.items()} }")
+                print(f"    Relevances: { {k: len(v) for k, v in relevances_by_k.items()} }")
                 print(f"    Latencies: {len(latencies)} items")
                 print(f"    Queries processed: {num_queries_processed}")
                 print(f"    Active MLflow run: {mlflow.active_run() is not None}")
@@ -419,34 +462,37 @@ with mlflow.start_run(run_name=f"eval_{build_run_id[:8]}") as eval_parent:
                 # Prepare all metrics as a dictionary for batch logging (more efficient and reliable)
                 metrics_to_log = {}
                 
-                # Calculate and prepare recall metric
-                if recalls and len(recalls) > 0:
-                    avg_recall = float(sum(recalls) / len(recalls))
-                    metrics_to_log[f"recall_at_{top_k}"] = avg_recall
-                    print(f"  ✅ Prepared recall_at_{top_k}: {avg_recall:.4f}")
-                else:
-                    metrics_to_log[f"recall_at_{top_k}"] = 0.0
-                    print(f"  ⚠️  No recall metrics - will log 0.0")
-                
-                # Calculate and prepare NDCG metric
-                if ndcgs and len(ndcgs) > 0:
-                    avg_ndcg = float(sum(ndcgs) / len(ndcgs))
-                    metrics_to_log[f"ndcg_at_{top_k}"] = avg_ndcg
-                    print(f"  ✅ Prepared ndcg_at_{top_k}: {avg_ndcg:.4f}")
-                else:
-                    metrics_to_log[f"ndcg_at_{top_k}"] = 0.0
-                    print(f"  ⚠️  No NDCG metrics - will log 0.0")
-                
-                # Calculate and prepare relevance/judge metrics
-                if relevances and len(relevances) > 0:
-                    avg_relevance = float(sum(relevances) / len(relevances))
-                    metrics_to_log[f"avg_relevance_at_{top_k}"] = avg_relevance
-                    metrics_to_log[f"judge_score_at_{top_k}"] = avg_relevance  # Also log as judge_score for consistency
-                    print(f"  ✅ Prepared avg_relevance_at_{top_k}: {avg_relevance:.4f}")
-                else:
-                    metrics_to_log[f"avg_relevance_at_{top_k}"] = 0.0
-                    metrics_to_log[f"judge_score_at_{top_k}"] = 0.0
-                    print(f"  ⚠️  No relevance metrics - will log 0.0")
+                # Calculate and prepare recall/NDCG/relevance metrics for each k
+                for k in metric_k_values:
+                    recalls = recalls_by_k.get(k, [])
+                    ndcgs = ndcgs_by_k.get(k, [])
+                    relevances = relevances_by_k.get(k, [])
+
+                    if recalls:
+                        avg_recall = float(sum(recalls) / len(recalls))
+                        metrics_to_log[f"recall_at_{k}"] = avg_recall
+                        print(f"  ✅ Prepared recall_at_{k}: {avg_recall:.4f}")
+                    else:
+                        metrics_to_log[f"recall_at_{k}"] = 0.0
+                        print(f"  ⚠️  No recall metrics for k={k} - will log 0.0")
+
+                    if ndcgs:
+                        avg_ndcg = float(sum(ndcgs) / len(ndcgs))
+                        metrics_to_log[f"ndcg_at_{k}"] = avg_ndcg
+                        print(f"  ✅ Prepared ndcg_at_{k}: {avg_ndcg:.4f}")
+                    else:
+                        metrics_to_log[f"ndcg_at_{k}"] = 0.0
+                        print(f"  ⚠️  No NDCG metrics for k={k} - will log 0.0")
+
+                    if relevances:
+                        avg_relevance = float(sum(relevances) / len(relevances))
+                        metrics_to_log[f"avg_relevance_at_{k}"] = avg_relevance
+                        metrics_to_log[f"judge_score_at_{k}"] = avg_relevance
+                        print(f"  ✅ Prepared avg_relevance_at_{k}: {avg_relevance:.4f}")
+                    else:
+                        metrics_to_log[f"avg_relevance_at_{k}"] = 0.0
+                        metrics_to_log[f"judge_score_at_{k}"] = 0.0
+                        print(f"  ⚠️  No relevance metrics for k={k} - will log 0.0")
                 
                 # Calculate and prepare latency metric (should always have data)
                 if latencies and len(latencies) > 0:
