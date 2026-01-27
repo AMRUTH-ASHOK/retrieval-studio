@@ -2,7 +2,6 @@ import { useState, useEffect } from 'react'
 import { ExternalLink, RefreshCw } from 'lucide-react'
 import { useProject } from '../context/ProjectContext'
 import { buildsApi } from '../services/builds'
-import { evaluationsApi } from '../services/evaluations'
 import { projectsApi } from '../services/projects'
 import { BuildJob, Evaluation } from '../types'
 import { Card } from '../components/ui/Card'
@@ -13,6 +12,7 @@ import BestPerformers from '../components/review/BestPerformers'
 import MetricsBarCharts from '../components/review/MetricsBarCharts'
 import ComparisonTable from '../components/review/ComparisonTable'
 import type { MLflowRun } from '../utils/metricsAggregation'
+import { evaluationsApi } from '../services/evaluations'
 
 export default function Review() {
   const { selectedProject, selectedProjectId } = useProject()
@@ -46,6 +46,9 @@ export default function Review() {
     fastest: null,
     bestOverall: null
   })
+  const [queryDetails, setQueryDetails] = useState<any[]>([])
+  const [selectedDetailsEvalId, setSelectedDetailsEvalId] = useState<string | null>(null)
+  const [isLoadingDetails, setIsLoadingDetails] = useState(false)
 
   // Load builds when project changes
   useEffect(() => {
@@ -63,6 +66,8 @@ export default function Review() {
   useEffect(() => {
     setShowResults(false)
     setError(null)
+    setQueryDetails([])
+    setSelectedDetailsEvalId(null)
     if (reviewScope !== 'evaluation') {
       setSelectedEvalIds(new Set())
       setEvaluationsByBuild(new Map())
@@ -79,6 +84,13 @@ export default function Review() {
       setShowResults(false)
     }
   }, [selectedBuildIds, reviewScope])
+
+  useEffect(() => {
+    if (reviewScope === 'evaluation' && selectedEvalIds.size > 0 && !selectedDetailsEvalId) {
+      const first = Array.from(selectedEvalIds)[0]
+      setSelectedDetailsEvalId(first)
+    }
+  }, [reviewScope, selectedEvalIds, selectedDetailsEvalId])
 
   const loadBuilds = async () => {
     if (!selectedProjectId) return
@@ -186,6 +198,39 @@ export default function Review() {
     }
   }
 
+  const loadQueryDetails = async (evalId: string) => {
+    setIsLoadingDetails(true)
+    try {
+      const results = await evaluationsApi.getResults(evalId)
+      const parsed = results.map((row: any) => {
+        const parseJson = (value: any) => {
+          if (!value) return null
+          if (typeof value === 'object') return value
+          try {
+            return JSON.parse(value)
+          } catch {
+            return value
+          }
+        }
+
+        return {
+          ...row,
+          expected_chunks_parsed: parseJson(row.expected_chunks),
+          retrieved_chunks_parsed: parseJson(row.retrieved_chunks),
+          metrics_parsed: parseJson(row.metrics),
+        }
+      })
+
+      setQueryDetails(parsed)
+      setSelectedDetailsEvalId(evalId)
+    } catch (error) {
+      console.error('Failed to load query details:', error)
+      setQueryDetails([])
+    } finally {
+      setIsLoadingDetails(false)
+    }
+  }
+
   const handleToggleBuild = (buildId: string) => {
     setSelectedBuildIds(prev => {
       const newSet = new Set(prev)
@@ -238,6 +283,45 @@ export default function Review() {
     } else if (reviewScope === 'evaluation' && selectedEvalIds.size > 0) {
       loadMetricsForScope()
     }
+  }
+
+  const renderChunks = (chunks: any[] | null, label: string) => {
+    if (!chunks || !Array.isArray(chunks) || chunks.length === 0) {
+      return <p className="text-xs text-databricks-gray-500">No {label} chunks</p>
+    }
+
+    return (
+      <div className="space-y-2">
+        {chunks.slice(0, 5).map((chunk, idx) => {
+          if (typeof chunk === 'string') {
+            return (
+              <div key={`${label}-${idx}`} className="text-xs text-databricks-gray-700 font-mono">
+                {chunk}
+              </div>
+            )
+          }
+
+          const chunkId = chunk.chunk_id || chunk.id || `chunk_${idx}`
+          const chunkText = chunk.chunk_text || chunk.text || ''
+          const score = chunk.score
+
+          return (
+            <div key={`${label}-${chunkId}-${idx}`} className="text-xs text-databricks-gray-700">
+              <div className="font-mono text-databricks-gray-900">{chunkId}</div>
+              {score !== undefined && (
+                <div className="text-databricks-gray-500">score: {score}</div>
+              )}
+              <div className="text-databricks-gray-600 mt-1">
+                {chunkText ? `${chunkText.slice(0, 200)}${chunkText.length > 200 ? '…' : ''}` : 'No text'}
+              </div>
+            </div>
+          )
+        })}
+        {chunks.length > 5 && (
+          <p className="text-xs text-databricks-gray-500">Showing first 5 of {chunks.length} chunks</p>
+        )}
+      </div>
+    )
   }
 
   // Calculate metrics when mlflowRuns changes
@@ -531,6 +615,74 @@ export default function Review() {
 
               {evaluationMetrics.length > 0 && (
                 <ComparisonTable evaluationMetrics={evaluationMetrics} />
+              )}
+
+              {reviewScope === 'evaluation' && selectedEvalIds.size > 0 && (
+                <Card className="mb-6">
+                  <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                    <div>
+                      <h2 className="text-lg font-semibold text-databricks-gray-900">
+                        🔎 Query Details
+                      </h2>
+                      <p className="text-xs text-databricks-gray-600">
+                        Inspect expected vs retrieved chunks per query.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <select
+                        className="text-xs border border-gray-300 rounded px-2 py-1"
+                        value={selectedDetailsEvalId || ''}
+                        onChange={(e) => setSelectedDetailsEvalId(e.target.value)}
+                      >
+                        {Array.from(selectedEvalIds).map((id) => (
+                          <option key={id} value={id}>
+                            {id.substring(0, 12)}...
+                          </option>
+                        ))}
+                      </select>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => selectedDetailsEvalId && loadQueryDetails(selectedDetailsEvalId)}
+                        disabled={isLoadingDetails || !selectedDetailsEvalId}
+                      >
+                        {isLoadingDetails ? 'Loading...' : 'Load Details'}
+                      </Button>
+                    </div>
+                  </div>
+
+                  {queryDetails.length === 0 && !isLoadingDetails && (
+                    <div className="text-center py-8 text-sm text-databricks-gray-600">
+                      No query details loaded yet.
+                    </div>
+                  )}
+
+                  {queryDetails.length > 0 && (
+                    <div className="space-y-3 max-h-[520px] overflow-y-auto">
+                      {queryDetails.map((row: any, idx: number) => (
+                        <details key={`${row.eval_result_id || idx}`} className="border border-gray-200 rounded-md p-3">
+                          <summary className="cursor-pointer text-sm font-medium text-databricks-gray-900">
+                            {row.query_text?.slice(0, 120) || 'Query'}{row.query_text?.length > 120 ? '…' : ''}
+                          </summary>
+                          <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                              <h4 className="text-xs font-semibold text-databricks-gray-900 mb-2">Expected Chunks</h4>
+                              {renderChunks(row.expected_chunks_parsed, 'expected')}
+                            </div>
+                            <div>
+                              <h4 className="text-xs font-semibold text-databricks-gray-900 mb-2">Retrieved Chunks</h4>
+                              {renderChunks(row.retrieved_chunks_parsed, 'retrieved')}
+                            </div>
+                          </div>
+                          <div className="mt-3 text-xs text-databricks-gray-700">
+                            <span className="font-semibold">Metrics: </span>
+                            {row.metrics_parsed ? JSON.stringify(row.metrics_parsed) : 'N/A'}
+                          </div>
+                        </details>
+                      ))}
+                    </div>
+                  )}
+                </Card>
               )}
             </>
           ) : (

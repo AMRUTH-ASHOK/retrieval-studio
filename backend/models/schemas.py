@@ -55,6 +55,13 @@ class EvaluationCreate(BaseModel):
     query_style: Optional[str] = "keyword"  # keyword, natural, or mixed
     compare_query_types: Optional[bool] = False  # Compare FULL_TEXT, ANN, HYBRID
     judge_model_endpoint: Optional[str] = None  # LLM judge endpoint for scoring without ground truth
+    generate_golden_dataset: Optional[bool] = False
+    use_golden_dataset: Optional[bool] = False
+    golden_dataset_table: Optional[str] = None
+    golden_dataset_id: Optional[str] = None
+    golden_strategy: Optional[str] = None
+    golden_query_type: Optional[str] = None
+    golden_top_k: Optional[int] = None
 
 
 class EvaluationResponse(BaseModel):

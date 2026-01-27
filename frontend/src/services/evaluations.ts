@@ -13,6 +13,13 @@ export const evaluationsApi = {
     query_style?: string
     compare_query_types?: boolean
     judge_model_endpoint?: string
+    generate_golden_dataset?: boolean
+    use_golden_dataset?: boolean
+    golden_dataset_table?: string
+    golden_dataset_id?: string
+    golden_strategy?: string
+    golden_query_type?: string
+    golden_top_k?: number
   }): Promise<Evaluation> => {
     const response = await api.post('/evaluations', data)
     return response.data

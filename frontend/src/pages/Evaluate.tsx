@@ -25,6 +25,13 @@ export default function Evaluate() {
   const [queryStyle, setQueryStyle] = useState('keyword')
   const [compareQueryTypes, setCompareQueryTypes] = useState(false)
   const [judgeModelEndpoint, setJudgeModelEndpoint] = useState('')
+  const [generateGoldenDataset, setGenerateGoldenDataset] = useState(false)
+  const [useGoldenDataset, setUseGoldenDataset] = useState(false)
+  const [goldenDatasetTable, setGoldenDatasetTable] = useState('')
+  const [goldenDatasetId, setGoldenDatasetId] = useState('')
+  const [goldenStrategy, setGoldenStrategy] = useState('')
+  const [goldenQueryType, setGoldenQueryType] = useState('ANN')
+  const [goldenTopK, setGoldenTopK] = useState<number | ''>('')
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
@@ -176,7 +183,17 @@ export default function Evaluate() {
 
     const isAutoGenerate = evaluationMode === 'auto-generate'
 
-    if (!isAutoGenerate && !datasetPath) {
+    if (generateGoldenDataset && useGoldenDataset) {
+      setError('Choose either "Generate golden dataset" or "Use existing golden dataset"')
+      return
+    }
+
+    if (useGoldenDataset && !goldenDatasetTable) {
+      setError('Please provide a golden dataset table')
+      return
+    }
+
+    if (!useGoldenDataset && !isAutoGenerate && !datasetPath) {
       setError('Please provide a queries dataset')
       return
     }
@@ -200,12 +217,36 @@ export default function Evaluate() {
         submitData.num_queries = numQueries
         submitData.query_style = queryStyle
       } else {
-        submitData.queries_table = datasetPath
-        submitData.dataset_type = datasetType
+        if (!useGoldenDataset) {
+          submitData.queries_table = datasetPath
+          submitData.dataset_type = datasetType
+        }
       }
 
       if (judgeModelEndpoint) {
         submitData.judge_model_endpoint = judgeModelEndpoint
+      }
+
+      if (generateGoldenDataset) {
+        submitData.generate_golden_dataset = true
+      }
+      if (useGoldenDataset) {
+        submitData.use_golden_dataset = true
+      }
+      if (goldenDatasetTable) {
+        submitData.golden_dataset_table = goldenDatasetTable
+      }
+      if (goldenDatasetId) {
+        submitData.golden_dataset_id = goldenDatasetId
+      }
+      if (goldenStrategy) {
+        submitData.golden_strategy = goldenStrategy
+      }
+      if (goldenQueryType) {
+        submitData.golden_query_type = goldenQueryType
+      }
+      if (goldenTopK) {
+        submitData.golden_top_k = goldenTopK
       }
 
       const result = await evaluationsApi.create(submitData)
@@ -496,6 +537,103 @@ export default function Evaluate() {
               placeholder="e.g., databricks-claude-sonnet-4-5"
               helperText="LLM endpoint for relevance scoring without ground truth labels. Leave empty to use ground truth if available."
             />
+
+            <div className="mt-6 p-4 bg-amber-50 border border-amber-200 rounded-lg space-y-3">
+              <h4 className="text-sm font-semibold text-databricks-gray-900">
+                Golden Dataset (LLM-Labeled)
+              </h4>
+
+              <div className="flex items-center space-x-2">
+                <input
+                  type="checkbox"
+                  id="generateGoldenDataset"
+                  checked={generateGoldenDataset}
+                  onChange={(e) => {
+                    const checked = e.target.checked
+                    setGenerateGoldenDataset(checked)
+                    if (checked) {
+                      setUseGoldenDataset(false)
+                    }
+                  }}
+                  className="w-4 h-4 text-databricks-blue border-gray-300 rounded focus:ring-databricks-blue"
+                />
+                <label htmlFor="generateGoldenDataset" className="text-sm font-medium text-databricks-gray-900">
+                  Generate golden dataset (one-time)
+                </label>
+              </div>
+
+              <div className="flex items-center space-x-2">
+                <input
+                  type="checkbox"
+                  id="useGoldenDataset"
+                  checked={useGoldenDataset}
+                  onChange={(e) => {
+                    const checked = e.target.checked
+                    setUseGoldenDataset(checked)
+                    if (checked) {
+                      setGenerateGoldenDataset(false)
+                    }
+                  }}
+                  className="w-4 h-4 text-databricks-blue border-gray-300 rounded focus:ring-databricks-blue"
+                />
+                <label htmlFor="useGoldenDataset" className="text-sm font-medium text-databricks-gray-900">
+                  Use existing golden dataset
+                </label>
+              </div>
+
+              {(generateGoldenDataset || useGoldenDataset) && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <Input
+                    label="Golden Dataset Table"
+                    value={goldenDatasetTable}
+                    onChange={(e) => setGoldenDatasetTable(e.target.value)}
+                    placeholder="catalog.schema.rs_golden_project"
+                    helperText="Delta table to store or read golden queries"
+                  />
+                  <Input
+                    label="Golden Dataset ID (Optional)"
+                    value={goldenDatasetId}
+                    onChange={(e) => setGoldenDatasetId(e.target.value)}
+                    placeholder="Leave empty to use latest"
+                    helperText="Filter a specific golden dataset run"
+                  />
+                </div>
+              )}
+
+              {generateGoldenDataset && (
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <Input
+                    label="Golden Strategy (Optional)"
+                    value={goldenStrategy}
+                    onChange={(e) => setGoldenStrategy(e.target.value)}
+                    placeholder="baseline"
+                    helperText="Strategy used to fetch candidates"
+                  />
+                  <Select
+                    label="Golden Query Type"
+                    value={goldenQueryType}
+                    onChange={(e) => setGoldenQueryType(e.target.value)}
+                    options={[
+                      { value: 'ANN', label: 'ANN' },
+                      { value: 'FULL_TEXT', label: 'FULL_TEXT' },
+                      { value: 'HYBRID', label: 'HYBRID' },
+                    ]}
+                    helperText="Query type used for candidate retrieval (if supported by your index)"
+                  />
+                  <Input
+                    label="Golden Top K (Optional)"
+                    type="number"
+                    value={goldenTopK.toString()}
+                    onChange={(e) => {
+                      const val = e.target.value
+                      setGoldenTopK(val ? parseInt(val) : '')
+                    }}
+                    placeholder={topK.toString()}
+                    helperText="Number of candidates per query"
+                  />
+                </div>
+              )}
+            </div>
           </div>
 
             {error && (
@@ -512,7 +650,7 @@ export default function Evaluate() {
                 !selectedProjectId ||
                 !selectedRunId ||
                 isSubmitting ||
-                (evaluationMode === 'existing' && !datasetPath)
+                (evaluationMode === 'existing' && !datasetPath && !useGoldenDataset)
               }
               icon={<PlayCircle className="w-4 h-4" />}
               className="w-full"

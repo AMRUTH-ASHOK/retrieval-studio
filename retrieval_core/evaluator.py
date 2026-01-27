@@ -328,6 +328,140 @@ Respond with ONLY a single digit (0, 1, 2, or 3), nothing else."""
 
         return 0
 
+    def _call_llm_api_text(self, prompt: str, max_tokens: int = 512, temperature: float = 0.0, max_retries: int = 3) -> str:
+        """
+        Call Databricks Foundation Model API and return raw text content.
+        """
+        if not self.api_token or not self.api_url:
+            raise ValueError("API client not configured")
+
+        endpoint_url = f"{self.api_url}/serving-endpoints/{self.judge_model_endpoint}/invocations"
+        headers = {
+            "Authorization": f"Bearer {self.api_token}",
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature
+        }
+
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(endpoint_url, json=payload, headers=headers, timeout=60)
+                response.raise_for_status()
+
+                result = response.json()
+
+                if "choices" in result and len(result["choices"]) > 0:
+                    return result["choices"][0].get("message", {}).get("content", "").strip()
+                if "predictions" in result and len(result["predictions"]) > 0:
+                    return result["predictions"][0].get("content", "").strip()
+
+                return str(result).strip()
+
+            except requests.exceptions.Timeout:
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+                raise
+            except Exception:
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+                raise
+
+        return ""
+
+    def label_expected_chunks(self, query_text: str, retrieved_chunks: List[Dict], max_chunks: int = 10) -> Dict[str, Any]:
+        """
+        Use a single LLM call to select relevant chunks from retrieved candidates.
+
+        Returns:
+            {
+              "expected_chunk_ids": [...],
+              "expected_chunks": [{"chunk_id": ..., "chunk_text": ...}, ...]
+            }
+        """
+        if not retrieved_chunks:
+            return {"expected_chunk_ids": [], "expected_chunks": []}
+
+        candidates = retrieved_chunks[:max_chunks]
+        formatted_chunks = []
+        for idx, chunk in enumerate(candidates, 1):
+            chunk_id = chunk.get("chunk_id", chunk.get("id", f"chunk_{idx}"))
+            chunk_text = chunk.get("chunk_text", chunk.get("text", ""))
+            if not chunk_text:
+                continue
+            # Trim to keep prompt size reasonable
+            chunk_text = chunk_text[:800]
+            formatted_chunks.append(f"{idx}. id: {chunk_id}\ntext: {chunk_text}")
+
+        prompt = (
+            "You are selecting which retrieved chunks best answer the query.\n"
+            "Return only the chunk IDs that are relevant.\n\n"
+            f"Query: {query_text}\n\n"
+            "Chunks:\n"
+            + "\n\n".join(formatted_chunks)
+            + "\n\nReturn JSON in this exact format:\n"
+            "{\"relevant_chunk_ids\": [\"id1\", \"id2\"]}\n"
+            "If none are relevant, return {\"relevant_chunk_ids\": []}."
+        )
+
+        try:
+            response_text = self._call_llm_api_text(prompt, max_tokens=300, temperature=0.0)
+        except Exception as e:
+            print(f"Warning: LLM labeling failed with error: {e}")
+            return {"expected_chunk_ids": [], "expected_chunks": []}
+
+        # Try to parse JSON
+        import json as _json
+        import re
+
+        def _extract_json(text: str) -> str:
+            match = re.search(r'(\{.*\}|\[.*\])', text, re.DOTALL)
+            return match.group(1) if match else ""
+
+        json_text = _extract_json(response_text)
+        expected_ids: List[str] = []
+        if json_text:
+            try:
+                parsed = _json.loads(json_text)
+                if isinstance(parsed, dict):
+                    expected_ids = parsed.get("relevant_chunk_ids", [])
+                elif isinstance(parsed, list):
+                    expected_ids = parsed
+            except Exception:
+                expected_ids = []
+
+        # Normalize IDs to strings
+        expected_ids = [str(i) for i in expected_ids if i is not None]
+
+        # Map IDs to chunk content
+        id_to_chunk = {}
+        for chunk in candidates:
+            cid = str(chunk.get("chunk_id", chunk.get("id", "")))
+            if cid:
+                id_to_chunk[cid] = chunk
+
+        expected_chunks = []
+        for cid in expected_ids:
+            chunk = id_to_chunk.get(cid)
+            if not chunk:
+                continue
+            expected_chunks.append({
+                "chunk_id": cid,
+                "chunk_text": chunk.get("chunk_text", chunk.get("text", "")),
+            })
+
+        return {
+            "expected_chunk_ids": expected_ids,
+            "expected_chunks": expected_chunks
+        }
+
     def _fallback_relevance_score(self, query_text: str, chunk_text: str) -> float:
         """
         Fallback relevance scoring using keyword overlap
@@ -392,4 +526,3 @@ Respond with ONLY a single digit (0, 1, 2, or 3), nothing else."""
             aggregated[f"avg_{key}"] = np.mean(values) if values else 0.0
         
         return aggregated
-

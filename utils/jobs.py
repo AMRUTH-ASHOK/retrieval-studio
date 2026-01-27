@@ -95,6 +95,13 @@ def submit_eval_job(
     query_style: str = "keyword",
     compare_query_types: bool = False,
     judge_model_endpoint: str = None,
+    generate_golden_dataset: bool = False,
+    use_golden_dataset: bool = False,
+    golden_dataset_table: str = None,
+    golden_dataset_id: str = None,
+    golden_strategy: str = None,
+    golden_query_type: str = None,
+    golden_top_k: int = None,
     timeout_minutes: int = 30,
     compute_size: str = None
 ) -> int:
@@ -150,6 +157,20 @@ def submit_eval_job(
             base_parameters["corpus_table"] = corpus_table
         if judge_model_endpoint:
             base_parameters["judge_model_endpoint"] = judge_model_endpoint
+        if generate_golden_dataset:
+            base_parameters["generate_golden_dataset"] = "true"
+        if use_golden_dataset:
+            base_parameters["use_golden_dataset"] = "true"
+        if golden_dataset_table:
+            base_parameters["golden_dataset_table"] = golden_dataset_table
+        if golden_dataset_id:
+            base_parameters["golden_dataset_id"] = golden_dataset_id
+        if golden_strategy:
+            base_parameters["golden_strategy"] = golden_strategy
+        if golden_query_type:
+            base_parameters["golden_query_type"] = golden_query_type
+        if golden_top_k:
+            base_parameters["golden_top_k"] = str(golden_top_k)
         
         timeout_seconds = (timeout_minutes + 15) * 60
         

@@ -16,6 +16,13 @@
 dbutils.widgets.text("build_run_id", "")
 dbutils.widgets.text("eval_id", "")
 dbutils.widgets.text("build_parent_run_id", "")
+dbutils.widgets.text("golden_dataset_table", "")
+dbutils.widgets.text("golden_dataset_id", "")
+dbutils.widgets.text("generate_golden_dataset", "false")
+dbutils.widgets.text("use_golden_dataset", "false")
+dbutils.widgets.text("golden_strategy", "")
+dbutils.widgets.text("golden_query_type", "ANN")
+dbutils.widgets.text("golden_top_k", "")
 dbutils.widgets.text("project_name", "default")
 dbutils.widgets.text("corpus_table", "")  # Optional: for auto query generation
 dbutils.widgets.text("queries_table", "")  # Optional: for manual queries
@@ -93,6 +100,13 @@ from utils.vs_utils import query_index
 build_run_id = dbutils.widgets.get("build_run_id")
 eval_id = dbutils.widgets.get("eval_id") or str(uuid.uuid4())
 build_parent_run_id = dbutils.widgets.get("build_parent_run_id") or ""
+golden_dataset_table = dbutils.widgets.get("golden_dataset_table") or ""
+golden_dataset_id = dbutils.widgets.get("golden_dataset_id") or ""
+generate_golden_dataset = dbutils.widgets.get("generate_golden_dataset").lower() == "true"
+use_golden_dataset = dbutils.widgets.get("use_golden_dataset").lower() == "true"
+golden_strategy = dbutils.widgets.get("golden_strategy") or ""
+golden_query_type = dbutils.widgets.get("golden_query_type") or "ANN"
+golden_top_k_str = dbutils.widgets.get("golden_top_k") or ""
 project_name = dbutils.widgets.get("project_name") or "default"
 auto_generate = dbutils.widgets.get("auto_generate_queries").lower() == "true"
 compare_types = dbutils.widgets.get("compare_query_types").lower() == "true"
@@ -104,7 +118,37 @@ enable_rich_analytics = enable_rich_analytics_str.lower() == "true"
 if not build_run_id:
     raise ValueError("Missing build_run_id")
 
-if auto_generate:
+if generate_golden_dataset and use_golden_dataset:
+    raise ValueError("generate_golden_dataset and use_golden_dataset cannot both be true")
+
+if use_golden_dataset:
+    if not golden_dataset_table:
+        golden_dataset_table = core_config.golden_dataset_table(project_name)
+
+    gdf = spark.table(golden_dataset_table)
+
+    if "expected_chunks" not in gdf.columns or "query_text" not in gdf.columns:
+        raise ValueError("Golden dataset must include query_text and expected_chunks columns")
+
+    if golden_dataset_id:
+        gdf = gdf.filter(gdf.golden_dataset_id == golden_dataset_id)
+    else:
+        latest_id_row = (
+            gdf.select("golden_dataset_id", "created_at")
+               .orderBy(gdf.created_at.desc())
+               .limit(1)
+               .collect()
+        )
+        if latest_id_row:
+            golden_dataset_id = latest_id_row[0]["golden_dataset_id"]
+            gdf = gdf.filter(gdf.golden_dataset_id == golden_dataset_id)
+
+    query_rows = gdf.select("query_text", "expected_chunks").collect()
+    if len(query_rows) == 0:
+        raise ValueError(f"No rows found in golden dataset {golden_dataset_table} (id={golden_dataset_id})")
+    print(f"Loaded {len(query_rows)} queries from golden dataset {golden_dataset_table} (id={golden_dataset_id})")
+
+elif auto_generate:
     # Automated Query Generation
     corpus_table = dbutils.widgets.get("corpus_table")
     if not corpus_table:
@@ -220,11 +264,121 @@ print("Strategies:", list(build_child_runs["params.strategy_name"]))
 # COMMAND ----------
 evaluator = RetrievalEvaluator(judge_model_endpoint=judge_endpoint)
 
+# COMMAND ----------
+# MAGIC %md
+# MAGIC ## Generate Golden Dataset (Optional)
+
+# COMMAND ----------
+if generate_golden_dataset:
+    if not golden_dataset_table:
+        golden_dataset_table = core_config.golden_dataset_table(project_name)
+
+    if not golden_dataset_id:
+        golden_dataset_id = str(uuid.uuid4())
+
+    label_top_k = int(golden_top_k_str or top_k)
+
+    # Pick a strategy to generate golden labels (prefer baseline)
+    strategy_name = golden_strategy or "baseline"
+    strategy_row = None
+    try:
+        strategy_row = build_child_runs[build_child_runs["params.strategy_name"] == strategy_name].iloc[0]
+    except Exception:
+        strategy_row = build_child_runs.iloc[0]
+        strategy_name = strategy_row.get("params.strategy_name")
+
+    index_name = strategy_row.get("params.vs_index_name")
+    vs_endpoint = strategy_row.get("params.vs_endpoint")
+
+    if not index_name or not vs_endpoint:
+        raise ValueError("Missing vs_endpoint or vs_index_name for golden dataset generation")
+
+    print(f"Generating golden dataset using strategy={strategy_name}, query_type={golden_query_type}, k={label_top_k}")
+
+    golden_rows = []
+    for i, qr in enumerate(query_rows):
+        qr_dict = qr.asDict() if hasattr(qr, "asDict") else dict(qr)
+        qtext = qr_dict.get("query_text")
+        if not qtext:
+            continue
+
+        retrieved = query_index(
+            vs_client=vs_client,
+            endpoint_name=vs_endpoint,
+            index_name=index_name,
+            query_text=qtext,
+            k=label_top_k,
+            query_type=golden_query_type,
+        )
+
+        labels = evaluator.label_expected_chunks(qtext, retrieved, max_chunks=label_top_k)
+        expected_chunk_ids = labels.get("expected_chunk_ids", [])
+        expected_chunks_payload = labels.get("expected_chunks", [])
+
+        golden_rows.append({
+            "golden_dataset_id": golden_dataset_id,
+            "eval_id": eval_id,
+            "project": project_name,
+            "build_run_id": build_run_id,
+            "strategy": strategy_name,
+            "query_text": qtext,
+            "expected_chunk_ids": json.dumps(expected_chunk_ids),
+            "expected_chunks": json.dumps(expected_chunks_payload),
+            "query_type": golden_query_type,
+        })
+
+        if (i + 1) % 10 == 0:
+            print(f"  Labeled {i+1}/{len(query_rows)} queries...")
+
+    from pyspark.sql.types import StructType, StructField, StringType
+
+    golden_schema = StructType([
+        StructField("golden_dataset_id", StringType(), False),
+        StructField("eval_id", StringType(), False),
+        StructField("project", StringType(), False),
+        StructField("build_run_id", StringType(), False),
+        StructField("strategy", StringType(), False),
+        StructField("query_text", StringType(), False),
+        StructField("expected_chunk_ids", StringType(), True),
+        StructField("expected_chunks", StringType(), True),
+        StructField("query_type", StringType(), True),
+    ])
+
+    spark.sql(f"""
+    CREATE TABLE IF NOT EXISTS {golden_dataset_table} (
+      golden_dataset_id STRING,
+      eval_id STRING,
+      project STRING,
+      build_run_id STRING,
+      strategy STRING,
+      query_text STRING,
+      expected_chunk_ids STRING,
+      expected_chunks STRING,
+      query_type STRING,
+      created_at TIMESTAMP
+    )
+    USING DELTA
+    """)
+
+    for column in ["expected_chunk_ids", "expected_chunks", "golden_dataset_id", "eval_id", "query_type"]:
+        try:
+            spark.sql(f"ALTER TABLE {golden_dataset_table} ADD COLUMNS ({column} STRING)")
+        except Exception:
+            pass
+
+    if golden_rows:
+        gdf = spark.createDataFrame(golden_rows, schema=golden_schema).withColumn("created_at", current_timestamp())
+        gdf.write.format("delta").mode("append").saveAsTable(golden_dataset_table)
+        print(f"Saved golden dataset to {golden_dataset_table} (id={golden_dataset_id}) with {len(golden_rows)} rows")
+
+        query_rows = gdf.select("query_text", "expected_chunks").collect()
+
 # Create eval results table
 eval_results_table = core_config.eval_results_table()
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {eval_results_table} (
   eval_result_id STRING,
+  eval_id STRING,
   build_run_id STRING,
   eval_run_id STRING,
   build_child_run_id STRING,
@@ -239,6 +393,19 @@ USING DELTA
 """)
 
 # Add new columns if they don't exist (for backwards compatibility)
+try:
+    spark.sql(f"ALTER TABLE {eval_results_table} ADD COLUMNS (eval_id STRING)")
+    print(f"Added eval_id column to {eval_results_table}")
+except Exception as e:
+    error_str = str(e).lower()
+    if ("already exists" in error_str or 
+        "cannot resolve" in error_str or 
+        "field_already_exists" in error_str or
+        "42710" in str(e)):
+        print(f"eval_id column already exists in {eval_results_table} - skipping")
+    else:
+        print(f"Note: Could not add eval_id column (may already exist): {e}")
+
 try:
     spark.sql(f"ALTER TABLE {eval_results_table} ADD COLUMNS (expected_chunks STRING, retrieved_chunks STRING)")
     print(f"Added expected_chunks and retrieved_chunks columns to {eval_results_table}")
@@ -336,18 +503,31 @@ with start_eval_parent_run(run_name=f"eval_{build_run_id[:8]}", parent_run_id=bu
                     expected_raw = qr_dict.get("expected_chunks")
 
                     expected_ids = None
+                    expected_chunks_payload = None
                     if expected_raw is not None:
                         if isinstance(expected_raw, str):
                             try:
-                                expected_ids = json.loads(expected_raw)
+                                parsed = json.loads(expected_raw)
+                                expected_raw = parsed
                             except json.JSONDecodeError:
                                 # Try to parse as comma-separated string
                                 try:
                                     expected_ids = [x.strip() for x in expected_raw.split(",") if x.strip()]
+                                    expected_chunks_payload = expected_ids
                                 except:
                                     expected_ids = None
-                        elif isinstance(expected_raw, (list, tuple)):
-                            expected_ids = list(expected_raw)
+                        if isinstance(expected_raw, (list, tuple)):
+                            if expected_raw and isinstance(expected_raw[0], dict):
+                                expected_ids = [str(e.get("chunk_id")) for e in expected_raw if e.get("chunk_id")]
+                                expected_chunks_payload = expected_raw
+                            else:
+                                expected_ids = list(expected_raw)
+                                expected_chunks_payload = expected_ids
+                        elif isinstance(expected_raw, dict):
+                            if "expected_chunks" in expected_raw:
+                                expected_chunks_payload = expected_raw.get("expected_chunks")
+                            if "expected_chunk_ids" in expected_raw:
+                                expected_ids = expected_raw.get("expected_chunk_ids")
                         else:
                             expected_ids = None
                     
@@ -425,6 +605,7 @@ with start_eval_parent_run(run_name=f"eval_{build_run_id[:8]}", parent_run_id=bu
                     # Store row
                     all_rows.append({
                         "eval_result_id": str(uuid.uuid4()),
+                        "eval_id": eval_id,
                         "build_run_id": build_run_id,
                         "eval_run_id": eval_child.info.run_id,
                         "build_child_run_id": build_child_run_id,
@@ -432,6 +613,8 @@ with start_eval_parent_run(run_name=f"eval_{build_run_id[:8]}", parent_run_id=bu
                         "strategy": strategy_name,
                         "query_type": query_type,
                         "query_text": qtext,
+                        "expected_chunks": json.dumps(expected_chunks_payload) if expected_chunks_payload else (json.dumps(expected_ids) if expected_ids else None),
+                        "retrieved_chunks": json.dumps(retrieved),
                         "metrics": json.dumps(metrics),
                     })
 
@@ -545,6 +728,7 @@ if all_rows:
     # Define explicit schema to avoid type inference issues
     schema = StructType([
         StructField("eval_result_id", StringType(), False),
+        StructField("eval_id", StringType(), False),
         StructField("build_run_id", StringType(), False),
         StructField("eval_run_id", StringType(), False),
         StructField("build_child_run_id", StringType(), False),
