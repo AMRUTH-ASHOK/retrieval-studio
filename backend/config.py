@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     CATALOG: str = core_config.UC_CATALOG
     SCHEMA: str = core_config.RAW_SCHEMA
 
+    # Unity Catalog Volume for data uploads
+    # Files are uploaded to this volume before build jobs run
+    DATA_VOLUME_NAME: str = core_config.DATA_VOLUME_NAME
+
     # Notebook Paths
     BUILD_NOTEBOOK_PATH: str = core_config.BUILD_NOTEBOOK_PATH
     EVAL_NOTEBOOK_PATH: str = core_config.EVAL_NOTEBOOK_PATH

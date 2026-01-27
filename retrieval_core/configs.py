@@ -7,6 +7,21 @@ class Config:
     RAW_SCHEMA = os.environ.get("RAW_SCHEMA", "raw")
     CHUNKS_SCHEMA = os.environ.get("CHUNKS_SCHEMA", "chunks")
     INDEXES_SCHEMA = os.environ.get("INDEXES_SCHEMA", "indexes")
+    
+    # Volume for storing uploaded data files
+    # Format: /Volumes/<catalog>/<schema>/<volume_name>
+    DATA_VOLUME_NAME = os.environ.get("DATA_VOLUME_NAME", "retrieval_data")
+    
+    @classmethod
+    def get_data_volume_path(cls) -> str:
+        """Get the full path to the data volume"""
+        return f"/Volumes/{cls.UC_CATALOG}/{cls.RAW_SCHEMA}/{cls.DATA_VOLUME_NAME}"
+    
+    @classmethod
+    def get_upload_path(cls, project_name: str, run_id: str) -> str:
+        """Get the upload path for a specific build run"""
+        safe_project = cls._safe_name(project_name).lower()
+        return f"{cls.get_data_volume_path()}/uploads/{safe_project}/{run_id}"
 
     # Workspace paths
     BASE_PATH = os.environ.get(
@@ -63,5 +78,10 @@ class Config:
     @classmethod
     def eval_results_table(cls) -> str:
         return cls.fq_table(cls.RAW_SCHEMA, "rs_eval_results")
+
+    @classmethod
+    def golden_dataset_table(cls, project_name: str) -> str:
+        p = cls._safe_name(project_name).lower()
+        return cls.fq_table(cls.RAW_SCHEMA, f"rs_golden_{p}")
 
 config = Config()

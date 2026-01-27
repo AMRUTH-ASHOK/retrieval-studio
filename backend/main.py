@@ -14,7 +14,7 @@ import uuid
 # Add project paths
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from backend.api import projects, builds, evaluations, leaderboard, metadata
+from backend.api import projects, builds, evaluations, leaderboard, metadata, uploads
 from backend.auth import get_workspace_client, get_vector_search_client, get_sql_connector as get_app_sql_connector
 from backend.config import settings
 
@@ -186,9 +186,14 @@ async def create_evaluation_no_trailing_slash(
         top_k = eval_request.top_k or 10
         dataset_type = eval_request.dataset_type or "delta_table"
         auto_generate = eval_request.auto_generate_queries or False
+        use_golden = eval_request.use_golden_dataset or False
+        generate_golden = eval_request.generate_golden_dataset or False
 
         # Validate required parameters based on mode
-        if auto_generate:
+        if use_golden:
+            if not eval_request.golden_dataset_table:
+                raise HTTPException(status_code=400, detail="golden_dataset_table is required when use_golden_dataset is true")
+        elif auto_generate:
             # Construct corpus_table name using the same logic as build notebook
             # No need to query Databricks API or PostgreSQL - just pure computation
             try:
@@ -260,7 +265,14 @@ async def create_evaluation_no_trailing_slash(
             num_queries=eval_request.num_queries or 50,
             query_style=eval_request.query_style or "keyword",
             compare_query_types=eval_request.compare_query_types or False,
-            judge_model_endpoint=eval_request.judge_model_endpoint
+            judge_model_endpoint=eval_request.judge_model_endpoint,
+            generate_golden_dataset=generate_golden,
+            use_golden_dataset=use_golden,
+            golden_dataset_table=eval_request.golden_dataset_table,
+            golden_dataset_id=eval_request.golden_dataset_id,
+            golden_strategy=eval_request.golden_strategy,
+            golden_query_type=eval_request.golden_query_type,
+            golden_top_k=eval_request.golden_top_k
         )
         
         # Get job run details to return timestamps
@@ -315,6 +327,7 @@ app.include_router(builds.router, prefix="/api/builds", tags=["builds"])
 app.include_router(evaluations.router, prefix="/api/evaluations", tags=["evaluations"])
 app.include_router(leaderboard.router, prefix="/api/leaderboard", tags=["leaderboard"])
 app.include_router(metadata.router, prefix="/api/metadata", tags=["metadata"])
+app.include_router(uploads.router, prefix="/api/uploads", tags=["uploads"])
 
 # Serve static files from React build
 FRONTEND_BUILD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist")

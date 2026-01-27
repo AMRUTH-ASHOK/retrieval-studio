@@ -112,10 +112,56 @@ ensure_uc_schemas()
 
 # COMMAND ----------
 # Load documents
+# 
+# Scalable Data Loading:
+# - If a volume_path is provided in data_config, files are read directly from 
+#   the Unity Catalog Volume. This is the recommended approach for large-scale
+#   data processing.
+# - Files were uploaded to the Volume by the frontend before triggering this job.
+# - The volume_path format is: /Volumes/<catalog>/<schema>/<volume>/uploads/<project>/<upload_id>
+
 handler = get_data_type_handler(data_type)
 documents = []
 
-if data_type == "delta_table":
+# Check if data should be loaded from a UC Volume (scalable approach)
+volume_path = data_config.get("volume_path")
+
+if volume_path:
+    # Load documents from Unity Catalog Volume
+    # This is the scalable approach - files were uploaded to Volume by the frontend
+    print(f"[INFO] Loading documents from UC Volume: {volume_path}")
+    
+    # Get file pattern from config (e.g., "*.pdf", "*.csv", "*.json")
+    file_pattern = data_config.get("file_pattern", "*.*")
+    
+    # Use the UC Volume data type handler to load files
+    uc_volume_handler = get_data_type_handler("uc_volume")
+    
+    # Prepare config for UC Volume handler
+    volume_config = {
+        "volume_path": volume_path,
+        "file_pattern": file_pattern,
+        "recursive": data_config.get("recursive", False),
+        # Pass through additional config for file-specific processing
+        "text_column": data_config.get("text_column", "text"),
+        "id_column": data_config.get("id_column"),
+        "has_header": data_config.get("has_header", True),
+        "text_field": data_config.get("text_field", "text"),
+        "id_field": data_config.get("id_field"),
+        "is_array": data_config.get("is_array", True),
+        "extract_images": data_config.get("extract_images", False),
+        "ocr_enabled": data_config.get("ocr_enabled", False),
+    }
+    
+    try:
+        documents = uc_volume_handler.load_documents(volume_config)
+        print(f"[INFO] Loaded {len(documents)} documents from UC Volume")
+    except Exception as e:
+        print(f"[ERROR] Failed to load documents from UC Volume: {e}")
+        raise ValueError(f"Failed to load documents from volume_path '{volume_path}': {str(e)}")
+
+elif data_type == "delta_table":
+    # Load from Delta Table
     table_name = data_config.get("table_name", "")
     text_column = data_config.get("text_column", "text")
     id_column = data_config.get("id_column")
@@ -140,6 +186,8 @@ if data_type == "delta_table":
             data_type="delta_table",
         ))
 else:
+    # Load using the standard data type handler
+    # (This includes text, uc_volume, and other direct configs)
     documents = handler.load_documents(data_config)
 
 if not documents:

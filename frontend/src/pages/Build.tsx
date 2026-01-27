@@ -1,7 +1,8 @@
-import { useState, useEffect, useRef } from 'react'
-import { PlayCircle, ChevronRight, ChevronLeft, CheckCircle2, ExternalLink, Clock, Copy, CheckCircle, Plus, Trash2 } from 'lucide-react'
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { PlayCircle, ChevronRight, ChevronLeft, CheckCircle2, ExternalLink, Clock, Copy, CheckCircle, Plus, Trash2, Upload, File, X, AlertCircle, Loader2 } from 'lucide-react'
 import { buildsApi } from '../services/builds'
 import { metadataApi } from '../services/metadata'
+import { uploadsApi, UploadResponse } from '../services/uploads'
 import { DataType, Strategy } from '../types'
 import { useProject } from '../context/ProjectContext'
 import { Button } from '../components/ui/Button'
@@ -10,6 +11,13 @@ import { Select } from '../components/ui/Select'
 import { Card, CardContent } from '../components/ui/Card'
 import { Badge } from '../components/ui/Badge'
 import { useNavigate } from 'react-router-dom'
+
+// File upload state interface
+interface UploadedFileState {
+  file: File
+  status: 'pending' | 'uploading' | 'uploaded' | 'error'
+  error?: string
+}
 
 export default function Build() {
   const navigate = useNavigate()
@@ -26,6 +34,14 @@ export default function Build() {
   ])
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState('')
+  
+  // File upload state for UC Volume upload
+  const [selectedFiles, setSelectedFiles] = useState<UploadedFileState[]>([])
+  const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number } | null>(null)
+  const [uploadedVolumePath, setUploadedVolumePath] = useState<string | null>(null)
+  const [isUploading, setIsUploading] = useState(false)
+  const [isDragOver, setIsDragOver] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const [submittedRunId, setSubmittedRunId] = useState<string | null>(null)
   const [jobStatus, setJobStatus] = useState<{
     state: string
@@ -70,11 +86,104 @@ export default function Build() {
   }, [submittedRunId])
 
   useEffect(() => {
-    // Reset data sources when data type changes
+    // Reset data sources and files when data type changes
     if (selectedDataType) {
       setDataSources([{ id: crypto.randomUUID(), config: {} }])
+      setSelectedFiles([])
+      setUploadedVolumePath(null)
     }
   }, [selectedDataType])
+
+  // File upload handlers
+  const handleFileSelect = useCallback((files: FileList | null) => {
+    if (!files) return
+    
+    const newFiles: UploadedFileState[] = Array.from(files).map(file => ({
+      file,
+      status: 'pending' as const
+    }))
+    
+    setSelectedFiles(prev => [...prev, ...newFiles])
+    // Reset upload state when new files are added
+    setUploadedVolumePath(null)
+  }, [])
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    setIsDragOver(false)
+    handleFileSelect(e.dataTransfer.files)
+  }, [handleFileSelect])
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    setIsDragOver(true)
+  }, [])
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    setIsDragOver(false)
+  }, [])
+
+  const removeFile = useCallback((index: number) => {
+    setSelectedFiles(prev => prev.filter((_, i) => i !== index))
+    setUploadedVolumePath(null)
+  }, [])
+
+  const uploadFilesToVolume = async (): Promise<string | null> => {
+    if (!selectedProject || selectedFiles.length === 0) return null
+    
+    setIsUploading(true)
+    setUploadProgress({ current: 0, total: selectedFiles.length })
+    
+    try {
+      // Get files that are pending or errored
+      const filesToUpload = selectedFiles
+        .filter(f => f.status === 'pending' || f.status === 'error')
+        .map(f => f.file)
+      
+      if (filesToUpload.length === 0 && uploadedVolumePath) {
+        // All files already uploaded
+        return uploadedVolumePath
+      }
+
+      // Upload all files at once
+      const response: UploadResponse = await uploadsApi.uploadFiles(
+        filesToUpload,
+        selectedProject.project_name
+      )
+      
+      // Update file states to uploaded
+      setSelectedFiles(prev => 
+        prev.map(f => ({
+          ...f,
+          status: 'uploaded' as const
+        }))
+      )
+      
+      setUploadedVolumePath(response.volume_path)
+      setUploadProgress({ current: filesToUpload.length, total: filesToUpload.length })
+      
+      console.log(`[INFO] Uploaded ${response.total_files} files to ${response.volume_path}`)
+      return response.volume_path
+      
+    } catch (error) {
+      console.error('Failed to upload files:', error)
+      // Mark files as errored
+      setSelectedFiles(prev => 
+        prev.map(f => ({
+          ...f,
+          status: 'error' as const,
+          error: 'Upload failed'
+        }))
+      )
+      throw error
+    } finally {
+      setIsUploading(false)
+    }
+  }
+
+  // Check if current data type requires file upload
+  const isFileUploadDataType = ['csv', 'json', 'pdf'].includes(selectedDataType)
 
   const pollJobStatus = async () => {
     if (!submittedRunId) return
@@ -219,13 +328,46 @@ export default function Build() {
           tables: dataSources.map((source) => source.config)
         }
       } else if (['csv', 'json', 'pdf'].includes(selectedDataType)) {
-        // File types: combine uploaded_files arrays
-        dataConfig = {
-          uploaded_files: dataSources.flatMap((source) => source.config.uploaded_files || []),
-          // Take other config from first source
-          ...dataSources[0]?.config,
-          uploaded_files: dataSources.flatMap((source) => source.config.uploaded_files || [])
+        // File types: Upload files to UC Volume first, then pass volume_path
+        // This is a scalable approach - files are stored in Unity Catalog Volumes
+        // instead of being passed as job parameters
+        
+        if (selectedFiles.length === 0) {
+          setError('Please select files to upload')
+          setIsSubmitting(false)
+          return
         }
+        
+        try {
+          const volumePath = await uploadFilesToVolume()
+          if (!volumePath) {
+            setError('Failed to upload files to volume')
+            setIsSubmitting(false)
+            return
+          }
+          
+          // Pass volume_path instead of file content
+          // The build job will read files from this volume path
+          dataConfig = {
+            volume_path: volumePath,
+            file_pattern: `*.${selectedDataType}`,
+            // Include additional config from first data source
+            ...dataSources[0]?.config,
+            // Ensure volume_path is set
+            volume_path: volumePath,
+          }
+          
+          console.log(`[INFO] Files uploaded to volume: ${volumePath}`)
+          
+        } catch (uploadError) {
+          console.error('Failed to upload files:', uploadError)
+          setError('Failed to upload files to Unity Catalog Volume. Please try again.')
+          setIsSubmitting(false)
+          return
+        }
+      } else if (selectedDataType === 'uc_volume') {
+        // UC Volume: user provides volume path directly
+        dataConfig = dataSources[0]?.config || {}
       } else {
         // Other types: use first source's config (backward compatibility)
         dataConfig = dataSources[0]?.config || {}
@@ -278,6 +420,10 @@ export default function Build() {
       setDataSources([{ id: crypto.randomUUID(), config: {} }])
       setEmbeddingEndpoint('')
       setVsEndpoint('')
+      // Reset file upload state
+      setSelectedFiles([])
+      setUploadedVolumePath(null)
+      setUploadProgress(null)
     } catch (error) {
       console.error('Failed to submit build job:', error)
       setError('Failed to submit build job')
@@ -396,22 +542,158 @@ export default function Build() {
               </Card>
             ))}
 
-            {/* Add Another Source Button */}
-            <Button
-              variant="outline"
-              onClick={addDataSource}
-              className="w-full border-2 border-dashed border-databricks-gray-300 hover:border-databricks-blue hover:bg-blue-50"
-            >
-              <Plus className="w-4 h-4 mr-2" />
-              Add Another {selectedDataTypeInfo?.display_name || 'Source'}
-            </Button>
+            {/* Add Another Source Button - only for non-file types */}
+            {!isFileUploadDataType && (
+              <Button
+                variant="outline"
+                onClick={addDataSource}
+                className="w-full border-2 border-dashed border-databricks-gray-300 hover:border-databricks-blue hover:bg-blue-50"
+              >
+                <Plus className="w-4 h-4 mr-2" />
+                Add Another {selectedDataTypeInfo?.display_name || 'Source'}
+              </Button>
+            )}
 
-            {selectedDataTypeInfo && selectedDataTypeInfo.input_schema?.source_type === 'upload' && (
-              <div className="p-4 bg-databricks-gray-50 rounded-md border border-databricks-gray-200">
-                <p className="text-sm text-databricks-gray-600">
-                  <span className="font-medium">Note:</span> File upload is handled through Databricks workspace.
-                  Please upload your files to a UC Volume or use Delta Table as data source.
-                </p>
+            {/* File Upload Section for file-based data types */}
+            {isFileUploadDataType && (
+              <div className="space-y-4">
+                <h4 className="text-md font-medium text-databricks-gray-800">
+                  Upload Files
+                </h4>
+                
+                {/* Drag and Drop Zone */}
+                <div
+                  onDrop={handleDrop}
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onClick={() => fileInputRef.current?.click()}
+                  className={`
+                    relative border-2 border-dashed rounded-lg p-8 text-center cursor-pointer
+                    transition-all duration-200
+                    ${isDragOver 
+                      ? 'border-databricks-blue bg-blue-50' 
+                      : 'border-databricks-gray-300 hover:border-databricks-blue hover:bg-blue-50'
+                    }
+                  `}
+                >
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    accept={selectedDataType === 'pdf' ? '.pdf' : selectedDataType === 'csv' ? '.csv' : '.json'}
+                    onChange={(e) => handleFileSelect(e.target.files)}
+                    className="hidden"
+                  />
+                  
+                  <Upload className={`w-10 h-10 mx-auto mb-3 ${isDragOver ? 'text-databricks-blue' : 'text-databricks-gray-400'}`} />
+                  
+                  <p className="text-sm font-medium text-databricks-gray-700">
+                    {isDragOver ? 'Drop files here' : 'Drag and drop files here'}
+                  </p>
+                  <p className="text-xs text-databricks-gray-500 mt-1">
+                    or click to browse
+                  </p>
+                  <p className="text-xs text-databricks-gray-400 mt-2">
+                    Supported: {selectedDataType === 'pdf' ? 'PDF' : selectedDataType === 'csv' ? 'CSV' : 'JSON'} files
+                  </p>
+                </div>
+
+                {/* Selected Files List */}
+                {selectedFiles.length > 0 && (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium text-databricks-gray-700">
+                        {selectedFiles.length} file{selectedFiles.length > 1 ? 's' : ''} selected
+                      </span>
+                      {uploadedVolumePath && (
+                        <Badge variant="success">
+                          <CheckCircle className="w-3 h-3 mr-1" />
+                          Uploaded
+                        </Badge>
+                      )}
+                    </div>
+                    
+                    <div className="max-h-48 overflow-y-auto space-y-2">
+                      {selectedFiles.map((fileState, index) => (
+                        <div
+                          key={index}
+                          className="flex items-center justify-between p-3 bg-databricks-gray-50 rounded-md border border-databricks-gray-200"
+                        >
+                          <div className="flex items-center space-x-3 flex-1 min-w-0">
+                            <File className="w-4 h-4 text-databricks-gray-500 flex-shrink-0" />
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-medium text-databricks-gray-800 truncate">
+                                {fileState.file.name}
+                              </p>
+                              <p className="text-xs text-databricks-gray-500">
+                                {(fileState.file.size / 1024).toFixed(1)} KB
+                              </p>
+                            </div>
+                            {fileState.status === 'uploaded' && (
+                              <CheckCircle className="w-4 h-4 text-green-500 flex-shrink-0" />
+                            )}
+                            {fileState.status === 'uploading' && (
+                              <Loader2 className="w-4 h-4 text-databricks-blue animate-spin flex-shrink-0" />
+                            )}
+                            {fileState.status === 'error' && (
+                              <AlertCircle className="w-4 h-4 text-red-500 flex-shrink-0" />
+                            )}
+                          </div>
+                          <button
+                            onClick={() => removeFile(index)}
+                            className="ml-2 p-1 text-databricks-gray-400 hover:text-databricks-error transition-colors"
+                            disabled={isUploading}
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Upload Progress */}
+                {isUploading && uploadProgress && (
+                  <div className="p-4 bg-blue-50 border border-blue-200 rounded-md">
+                    <div className="flex items-center space-x-3">
+                      <Loader2 className="w-5 h-5 text-databricks-blue animate-spin" />
+                      <div className="flex-1">
+                        <p className="text-sm font-medium text-blue-800">
+                          Uploading files to Unity Catalog Volume...
+                        </p>
+                        <p className="text-xs text-blue-600">
+                          {uploadProgress.current} of {uploadProgress.total} files
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Volume Path Info */}
+                {uploadedVolumePath && (
+                  <div className="p-4 bg-green-50 border border-green-200 rounded-md">
+                    <div className="flex items-start space-x-3">
+                      <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-green-800">
+                          Files uploaded successfully
+                        </p>
+                        <p className="text-xs text-green-600 truncate mt-1">
+                          Volume path: {uploadedVolumePath}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Info Box */}
+                <div className="p-4 bg-databricks-gray-50 rounded-md border border-databricks-gray-200">
+                  <p className="text-sm text-databricks-gray-600">
+                    <span className="font-medium">Scalable upload:</span> Files are uploaded to Unity Catalog Volumes 
+                    for efficient processing. The build job reads directly from the volume, 
+                    enabling large-scale data handling.
+                  </p>
+                </div>
               </div>
             )}
           </div>
