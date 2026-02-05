@@ -25,6 +25,8 @@ export default function MetricsBarCharts({
   const [viewMode, setViewMode] = useState<ViewMode>('build')
 
   const metrics: Array<{ key: keyof AggregatedMetrics; title: string }> = [
+    { key: 'precision_at_5', title: 'Precision@5' },
+    { key: 'precision_at_10', title: 'Precision@10' },
     { key: 'recall_at_5', title: 'Recall@5' },
     { key: 'recall_at_10', title: 'Recall@10' },
     { key: 'ndcg_at_5', title: 'NDCG@5' },

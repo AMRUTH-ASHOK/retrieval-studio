@@ -9,8 +9,8 @@ interface ComparisonTableProps {
 }
 
 type SortColumn = 'eval_name' | 'build_run_id' | 'strategy' | 'query_type' |
-  'recall_at_5' | 'recall_at_10' | 'ndcg_at_5' | 'ndcg_at_10' |
-  'avg_relevance_at_5' | 'avg_latency_ms' | 'num_queries'
+  'precision_at_5' | 'precision_at_10' | 'recall_at_5' | 'recall_at_10' |
+  'ndcg_at_5' | 'ndcg_at_10' | 'avg_latency_ms' | 'num_queries'
 
 export default function ComparisonTable({ evaluationMetrics }: ComparisonTableProps) {
   const [sortColumn, setSortColumn] = useState<SortColumn>('recall_at_10')
@@ -53,11 +53,12 @@ export default function ComparisonTable({ evaluationMetrics }: ComparisonTablePr
       'Build ID',
       'Strategy',
       'Query Type',
+      'Precision@5',
+      'Precision@10',
       'Recall@5',
       'Recall@10',
       'NDCG@5',
       'NDCG@10',
-      'Avg Relevance@5',
       'Latency (ms)',
       'Num Queries'
     ]
@@ -67,11 +68,12 @@ export default function ComparisonTable({ evaluationMetrics }: ComparisonTablePr
       `"${evaluation.build_run_id}"`,
       `"${evaluation.strategy}"`,
       `"${evaluation.query_type}"`,
+      evaluation.metrics.precision_at_5 || '',
+      evaluation.metrics.precision_at_10 || '',
       evaluation.metrics.recall_at_5 || '',
       evaluation.metrics.recall_at_10 || '',
       evaluation.metrics.ndcg_at_5 || '',
       evaluation.metrics.ndcg_at_10 || '',
-      evaluation.metrics.avg_relevance_at_5 || '',
       evaluation.metrics.avg_latency_ms || '',
       evaluation.metrics.num_queries || ''
     ].join(','))
@@ -160,6 +162,20 @@ export default function ComparisonTable({ evaluationMetrics }: ComparisonTablePr
               <th
                 scope="col"
                 className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
+                onClick={() => handleSort('precision_at_5')}
+              >
+                Precision@5 <SortIcon column="precision_at_5" />
+              </th>
+              <th
+                scope="col"
+                className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
+                onClick={() => handleSort('precision_at_10')}
+              >
+                Precision@10 <SortIcon column="precision_at_10" />
+              </th>
+              <th
+                scope="col"
+                className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
                 onClick={() => handleSort('recall_at_5')}
               >
                 Recall@5 <SortIcon column="recall_at_5" />
@@ -213,6 +229,20 @@ export default function ComparisonTable({ evaluationMetrics }: ComparisonTablePr
                       : 'bg-blue-100 text-blue-800'
                   }`}>
                     {evaluation.query_type}
+                  </span>
+                </td>
+                <td className="px-4 py-3 whitespace-nowrap text-sm">
+                  <span className={`px-2 py-1 rounded text-xs font-medium ${
+                    getMetricColor(evaluation.metrics.precision_at_5 || 0, 'precision_at_5')
+                  }`}>
+                    {formatMetricValue(evaluation.metrics.precision_at_5 || 0, 'precision_at_5')}
+                  </span>
+                </td>
+                <td className="px-4 py-3 whitespace-nowrap text-sm">
+                  <span className={`px-2 py-1 rounded text-xs font-medium ${
+                    getMetricColor(evaluation.metrics.precision_at_10 || 0, 'precision_at_10')
+                  }`}>
+                    {formatMetricValue(evaluation.metrics.precision_at_10 || 0, 'precision_at_10')}
                   </span>
                 </td>
                 <td className="px-4 py-3 whitespace-nowrap text-sm">

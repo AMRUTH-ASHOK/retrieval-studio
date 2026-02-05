@@ -16,12 +16,12 @@ export type MLflowRun = {
 }
 
 export type AggregatedMetrics = {
+  precision_at_5?: number
+  precision_at_10?: number
   recall_at_5?: number
   recall_at_10?: number
   ndcg_at_5?: number
   ndcg_at_10?: number
-  avg_relevance_at_5?: number
-  avg_relevance_at_10?: number
   avg_latency_ms?: number
   num_queries?: number
 }

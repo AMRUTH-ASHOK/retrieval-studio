@@ -6,32 +6,21 @@ import { buildsApi } from '../services/builds'
 import { useProject } from '../context/ProjectContext'
 import { Button } from '../components/ui/Button'
 import { Input } from '../components/ui/Input'
-import { Select } from '../components/ui/Select'
 import { Card, CardContent } from '../components/ui/Card'
 import { Badge } from '../components/ui/Badge'
 import { BuildJob } from '../types'
 
-type DatasetType = 'delta_table' | 'csv' | 'excel'
+const DEFAULT_NUM_QUERIES = 50
+const DEFAULT_QUERY_STYLE = 'keyword'
 
 export default function Evaluate() {
   const navigate = useNavigate()
   const { selectedProject, selectedProjectId } = useProject()
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
-  const [datasetType, setDatasetType] = useState<DatasetType>('delta_table')
-  const [datasetPath, setDatasetPath] = useState('')
   const [topK, setTopK] = useState(10)
-  const [autoGenerateQueries, setAutoGenerateQueries] = useState(false)
-  const [numQueries, setNumQueries] = useState(50)
-  const [queryStyle, setQueryStyle] = useState('keyword')
   const [compareQueryTypes, setCompareQueryTypes] = useState(false)
-  const [judgeModelEndpoint, setJudgeModelEndpoint] = useState('')
-  const [generateGoldenDataset, setGenerateGoldenDataset] = useState(false)
-  const [useGoldenDataset, setUseGoldenDataset] = useState(false)
+  const [existingGoldenTable, setExistingGoldenTable] = useState('')
   const [goldenDatasetTable, setGoldenDatasetTable] = useState('')
-  const [goldenDatasetId, setGoldenDatasetId] = useState('')
-  const [goldenStrategy, setGoldenStrategy] = useState('')
-  const [goldenQueryType, setGoldenQueryType] = useState('ANN')
-  const [goldenTopK, setGoldenTopK] = useState<number | ''>('')
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
@@ -183,23 +172,17 @@ export default function Evaluate() {
 
     const isAutoGenerate = evaluationMode === 'auto-generate'
 
-    if (generateGoldenDataset && useGoldenDataset) {
-      setError('Choose either "Generate golden dataset" or "Use existing golden dataset"')
+    if (!isAutoGenerate && !existingGoldenTable) {
+      setError('Please provide the golden dataset table')
       return
     }
 
-    if (useGoldenDataset && !goldenDatasetTable) {
-      setError('Please provide a golden dataset table')
-      return
+    if (isAutoGenerate) {
+      if (!goldenDatasetTable) {
+        setError('Please provide the golden dataset table')
+        return
+      }
     }
-
-    if (!useGoldenDataset && !isAutoGenerate && !datasetPath) {
-      setError('Please provide a queries dataset')
-      return
-    }
-
-    // Corpus table will be auto-extracted from build results by the backend
-    // No need to validate here
 
     setIsSubmitting(true)
     setError('')
@@ -208,45 +191,19 @@ export default function Evaluate() {
       const submitData: any = {
         run_id: selectedRunId,
         top_k: topK,
-        auto_generate_queries: isAutoGenerate,
         compare_query_types: compareQueryTypes,
       }
 
       if (isAutoGenerate) {
-        // Don't send corpus_table - let backend auto-extract it from build results
-        submitData.num_queries = numQueries
-        submitData.query_style = queryStyle
-      } else {
-        if (!useGoldenDataset) {
-          submitData.queries_table = datasetPath
-          submitData.dataset_type = datasetType
-        }
-      }
-
-      if (judgeModelEndpoint) {
-        submitData.judge_model_endpoint = judgeModelEndpoint
-      }
-
-      if (generateGoldenDataset) {
+        submitData.auto_generate_queries = true
+        // corpus_table is auto-detected from build's baseline table by backend
         submitData.generate_golden_dataset = true
-      }
-      if (useGoldenDataset) {
-        submitData.use_golden_dataset = true
-      }
-      if (goldenDatasetTable) {
         submitData.golden_dataset_table = goldenDatasetTable
-      }
-      if (goldenDatasetId) {
-        submitData.golden_dataset_id = goldenDatasetId
-      }
-      if (goldenStrategy) {
-        submitData.golden_strategy = goldenStrategy
-      }
-      if (goldenQueryType) {
-        submitData.golden_query_type = goldenQueryType
-      }
-      if (goldenTopK) {
-        submitData.golden_top_k = goldenTopK
+        submitData.num_queries = DEFAULT_NUM_QUERIES
+        submitData.query_style = DEFAULT_QUERY_STYLE
+      } else {
+        submitData.use_golden_dataset = true
+        submitData.golden_dataset_table = existingGoldenTable
       }
 
       const result = await evaluationsApi.create(submitData)
@@ -285,7 +242,6 @@ export default function Evaluate() {
       console.log('[DEBUG] About to reset form and set isSubmitting to false')
 
       // Reset form (but keep showing status)
-      setDatasetPath('')
       setIsSubmitting(false)
     } catch (error: any) {
       console.error('Failed to submit evaluation:', error)
@@ -381,10 +337,11 @@ export default function Evaluate() {
                   />
                   <div className="ml-3 flex-1">
                     <div className="font-semibold text-databricks-gray-900 text-base">
-                      Option 1: Use Existing Queries Dataset
+                      Option 1: Use Existing Golden Dataset
                     </div>
                     <p className="text-sm text-databricks-gray-600 mt-1">
-                      Provide a pre-existing dataset with query_text and optional expected_chunks columns
+                      Provide a Delta table with <code className="bg-gray-100 px-1 rounded">query_text</code> and
+                      <code className="bg-gray-100 px-1 rounded ml-1">expected_chunks</code> (chunk text only).
                     </p>
                   </div>
                 </label>
@@ -410,90 +367,41 @@ export default function Evaluate() {
                   />
                   <div className="ml-3 flex-1">
                     <div className="font-semibold text-databricks-gray-900 text-base">
-                      Option 2: Auto-Generate Queries
+                      Option 2: Auto-Generate Queries (Auto-Golden)
                     </div>
                     <p className="text-sm text-databricks-gray-600 mt-1">
-                      Automatically generate synthetic evaluation queries from your corpus using LLM (no dataset required)
+                      Generate queries from your build's baseline table and auto-create the golden dataset (defaults: {DEFAULT_NUM_QUERIES} {DEFAULT_QUERY_STYLE} queries).
                     </p>
                   </div>
                 </label>
               </div>
             </div>
 
-            {/* Configuration Section with Clear Heading */}
+            {/* Configuration Section */}
             <div className="border-t-4 border-databricks-blue pt-6">
               <h3 className="text-md font-semibold text-databricks-gray-900 mb-4">
-                {evaluationMode === 'existing' ? '📄 Dataset Configuration' : '🤖 Auto-Generation Configuration'}
+                {evaluationMode === 'existing' ? '📄 Golden Dataset' : '🤖 Auto-Generate & Golden Dataset'}
               </h3>
 
-              {/* Option 1: Existing Dataset Fields */}
-              {evaluationMode === 'existing' && (
+              {evaluationMode === 'existing' ? (
                 <div className="space-y-4 p-5 bg-blue-50 border border-blue-200 rounded-lg">
-                  <Select
-                    label="Dataset Type"
-                    value={datasetType}
-                    onChange={(e) => {
-                      setDatasetType(e.target.value as DatasetType)
-                      setDatasetPath('')
-                    }}
-                    options={[
-                      { value: 'delta_table', label: 'Delta Table' },
-                      { value: 'csv', label: 'CSV File' },
-                      { value: 'excel', label: 'Excel File' },
-                    ]}
-                    helperText="Select the type of golden dataset"
-                  />
-
                   <Input
-                    label={
-                      datasetType === 'delta_table'
-                        ? 'Delta Table Path'
-                        : datasetType === 'csv'
-                        ? 'CSV File Path'
-                        : 'Excel File Path'
-                    }
-                    value={datasetPath}
-                    onChange={(e) => setDatasetPath(e.target.value)}
-                    placeholder={
-                      datasetType === 'delta_table'
-                        ? 'e.g., catalog.schema.queries_table'
-                        : datasetType === 'csv'
-                        ? 'e.g., /path/to/file.csv'
-                        : 'e.g., /path/to/file.xlsx'
-                    }
-                    helperText={
-                      datasetType === 'delta_table'
-                        ? 'Fully qualified table name (catalog.schema.table)'
-                        : 'Path to the file in Databricks workspace or DBFS'
-                    }
+                    label="Golden Dataset Table (Delta)"
+                    value={existingGoldenTable}
+                    onChange={(e) => setExistingGoldenTable(e.target.value)}
+                    placeholder="catalog.schema.rs_golden_project"
+                    helperText="Must include query_text and expected_chunks (chunk text only)"
                   />
                 </div>
-              )}
-
-              {/* Option 2: Auto-Generate Fields */}
-              {evaluationMode === 'auto-generate' && (
+              ) : (
                 <div className="space-y-4 p-5 bg-green-50 border border-green-200 rounded-lg">
-                  <div className="grid grid-cols-2 gap-4">
-                    <Input
-                      label="Number of Queries"
-                      type="number"
-                      value={numQueries.toString()}
-                      onChange={(e) => setNumQueries(parseInt(e.target.value) || 50)}
-                      placeholder="50"
-                      helperText="Number of queries to generate"
-                    />
-                    <Select
-                      label="Query Style"
-                      value={queryStyle}
-                      onChange={(e) => setQueryStyle(e.target.value)}
-                      options={[
-                        { value: 'keyword', label: 'Keyword (2-5 words)' },
-                        { value: 'natural', label: 'Natural (full questions)' },
-                        { value: 'mixed', label: 'Mixed' },
-                      ]}
-                      helperText="Style of queries to generate"
-                    />
-                  </div>
+                  <Input
+                    label="Golden Dataset Table (Delta)"
+                    value={goldenDatasetTable}
+                    onChange={(e) => setGoldenDatasetTable(e.target.value)}
+                    placeholder="catalog.schema.rs_golden_project"
+                    helperText="Where generated queries + labels will be stored. Corpus table is auto-detected from your build's baseline table."
+                  />
                 </div>
               )}
             </div>
@@ -508,10 +416,10 @@ export default function Evaluate() {
             helperText="Number of top results to retrieve"
           />
 
-          {/* Advanced Options */}
+          {/* Evaluation Settings */}
           <div className="border-t pt-4 mt-4">
             <h3 className="text-sm font-semibold text-databricks-gray-900 mb-3">
-              Advanced Options
+              Evaluation Settings
             </h3>
 
             <div className="flex items-center space-x-2 mb-4">
@@ -527,113 +435,8 @@ export default function Evaluate() {
               </label>
             </div>
             <p className="text-xs text-databricks-gray-600 -mt-2 ml-6 mb-4">
-              Test and compare different search methods on the same index
+              Compare different search modes on the same index (if supported by your index setup).
             </p>
-
-            <Input
-              label="LLM Judge Endpoint (Optional)"
-              value={judgeModelEndpoint}
-              onChange={(e) => setJudgeModelEndpoint(e.target.value)}
-              placeholder="e.g., databricks-claude-sonnet-4-5"
-              helperText="LLM endpoint for relevance scoring without ground truth labels. Leave empty to use ground truth if available."
-            />
-
-            <div className="mt-6 p-4 bg-amber-50 border border-amber-200 rounded-lg space-y-3">
-              <h4 className="text-sm font-semibold text-databricks-gray-900">
-                Golden Dataset (LLM-Labeled)
-              </h4>
-
-              <div className="flex items-center space-x-2">
-                <input
-                  type="checkbox"
-                  id="generateGoldenDataset"
-                  checked={generateGoldenDataset}
-                  onChange={(e) => {
-                    const checked = e.target.checked
-                    setGenerateGoldenDataset(checked)
-                    if (checked) {
-                      setUseGoldenDataset(false)
-                    }
-                  }}
-                  className="w-4 h-4 text-databricks-blue border-gray-300 rounded focus:ring-databricks-blue"
-                />
-                <label htmlFor="generateGoldenDataset" className="text-sm font-medium text-databricks-gray-900">
-                  Generate golden dataset (one-time)
-                </label>
-              </div>
-
-              <div className="flex items-center space-x-2">
-                <input
-                  type="checkbox"
-                  id="useGoldenDataset"
-                  checked={useGoldenDataset}
-                  onChange={(e) => {
-                    const checked = e.target.checked
-                    setUseGoldenDataset(checked)
-                    if (checked) {
-                      setGenerateGoldenDataset(false)
-                    }
-                  }}
-                  className="w-4 h-4 text-databricks-blue border-gray-300 rounded focus:ring-databricks-blue"
-                />
-                <label htmlFor="useGoldenDataset" className="text-sm font-medium text-databricks-gray-900">
-                  Use existing golden dataset
-                </label>
-              </div>
-
-              {(generateGoldenDataset || useGoldenDataset) && (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <Input
-                    label="Golden Dataset Table"
-                    value={goldenDatasetTable}
-                    onChange={(e) => setGoldenDatasetTable(e.target.value)}
-                    placeholder="catalog.schema.rs_golden_project"
-                    helperText="Delta table to store or read golden queries"
-                  />
-                  <Input
-                    label="Golden Dataset ID (Optional)"
-                    value={goldenDatasetId}
-                    onChange={(e) => setGoldenDatasetId(e.target.value)}
-                    placeholder="Leave empty to use latest"
-                    helperText="Filter a specific golden dataset run"
-                  />
-                </div>
-              )}
-
-              {generateGoldenDataset && (
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <Input
-                    label="Golden Strategy (Optional)"
-                    value={goldenStrategy}
-                    onChange={(e) => setGoldenStrategy(e.target.value)}
-                    placeholder="baseline"
-                    helperText="Strategy used to fetch candidates"
-                  />
-                  <Select
-                    label="Golden Query Type"
-                    value={goldenQueryType}
-                    onChange={(e) => setGoldenQueryType(e.target.value)}
-                    options={[
-                      { value: 'ANN', label: 'ANN' },
-                      { value: 'FULL_TEXT', label: 'FULL_TEXT' },
-                      { value: 'HYBRID', label: 'HYBRID' },
-                    ]}
-                    helperText="Query type used for candidate retrieval (if supported by your index)"
-                  />
-                  <Input
-                    label="Golden Top K (Optional)"
-                    type="number"
-                    value={goldenTopK.toString()}
-                    onChange={(e) => {
-                      const val = e.target.value
-                      setGoldenTopK(val ? parseInt(val) : '')
-                    }}
-                    placeholder={topK.toString()}
-                    helperText="Number of candidates per query"
-                  />
-                </div>
-              )}
-            </div>
           </div>
 
             {error && (
@@ -650,7 +453,8 @@ export default function Evaluate() {
                 !selectedProjectId ||
                 !selectedRunId ||
                 isSubmitting ||
-                (evaluationMode === 'existing' && !datasetPath && !useGoldenDataset)
+                (evaluationMode === 'existing' && !existingGoldenTable) ||
+                (evaluationMode === 'auto-generate' && !goldenDatasetTable)
               }
               icon={<PlayCircle className="w-4 h-4" />}
               className="w-full"
@@ -672,13 +476,15 @@ export default function Evaluate() {
               <li className="flex items-start">
                 <span className="mr-2">1.</span>
                 <span>
-                  <strong>Upload Golden Dataset:</strong> Use a pre-existing dataset with <code className="bg-gray-100 px-1 rounded">query_text</code> column. Include <code className="bg-gray-100 px-1 rounded">expected_chunks</code> for labeled evaluation with ground truth.
+                  <strong>Use Existing Golden Dataset:</strong> Provide a Delta table containing
+                  <code className="bg-gray-100 px-1 rounded ml-1">query_text</code> and
+                  <code className="bg-gray-100 px-1 rounded ml-1">expected_chunks</code> (chunk text only).
                 </span>
               </li>
               <li className="flex items-start">
                 <span className="mr-2">2.</span>
                 <span>
-                  <strong>Auto-Generate Queries:</strong> Generate synthetic queries from your corpus using LLM. Specify number of queries and query style. No manual dataset needed.
+                  <strong>Auto-Generate Queries:</strong> Generate queries from your build's baseline table and automatically create a golden dataset. The corpus table is auto-detected from your build configuration.
                 </span>
               </li>
             </ul>
@@ -693,12 +499,6 @@ export default function Evaluate() {
                   <strong>Query Type Comparison:</strong> Test FULL_TEXT (keyword), ANN (semantic), and HYBRID search on the same queries to find the best method.
                 </span>
               </li>
-              <li className="flex items-start">
-                <span className="mr-2">•</span>
-                <span>
-                  <strong>LLM Judge:</strong> Score relevance without ground truth labels using an LLM endpoint (0-3 scale). Useful when you don't have expected_chunks.
-                </span>
-              </li>
             </ul>
           </div>
 
@@ -707,7 +507,11 @@ export default function Evaluate() {
             <ul className="space-y-2 ml-4">
               <li className="flex items-start">
                 <span className="mr-2">•</span>
-                <span>Evaluation computes Recall@K, NDCG@K, Precision@K, and LLM relevance scores</span>
+                <span>Evaluation computes Precision@K, Recall@K, and NDCG@K</span>
+              </li>
+              <li className="flex items-start">
+                <span className="mr-2">•</span>
+                <span>A retrieved chunk is considered correct if it contains the expected chunk text</span>
               </li>
               <li className="flex items-start">
                 <span className="mr-2">•</span>

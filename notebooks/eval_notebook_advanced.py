@@ -313,7 +313,10 @@ if generate_golden_dataset:
 
         labels = evaluator.label_expected_chunks(qtext, retrieved, max_chunks=label_top_k)
         expected_chunk_ids = labels.get("expected_chunk_ids", [])
-        expected_chunks_payload = labels.get("expected_chunks", [])
+        expected_chunks_payload = [
+            c.get("chunk_text") for c in (labels.get("expected_chunks", []) or [])
+            if isinstance(c, dict) and c.get("chunk_text")
+        ]
 
         golden_rows.append({
             "golden_dataset_id": golden_dataset_id,
@@ -492,8 +495,8 @@ with start_eval_parent_run(run_name=f"eval_{build_run_id[:8]}", parent_run_id=bu
                 mlflow.set_tag("query_type", query_type)
 
                 recalls_by_k = {k: [] for k in metric_k_values}
+                precisions_by_k = {k: [] for k in metric_k_values}
                 ndcgs_by_k = {k: [] for k in metric_k_values}
-                relevances_by_k = {k: [] for k in metric_k_values}
                 latencies = []
 
                 for i, qr in enumerate(query_rows):
@@ -502,40 +505,44 @@ with start_eval_parent_run(run_name=f"eval_{build_run_id[:8]}", parent_run_id=bu
                     qr_dict = qr.asDict() if hasattr(qr, 'asDict') else dict(qr)
                     expected_raw = qr_dict.get("expected_chunks")
 
-                    expected_ids = None
-                    expected_chunks_payload = None
+                    expected_texts = []
                     if expected_raw is not None:
                         if isinstance(expected_raw, str):
                             try:
                                 parsed = json.loads(expected_raw)
                                 expected_raw = parsed
                             except json.JSONDecodeError:
-                                # Try to parse as comma-separated string
-                                try:
-                                    expected_ids = [x.strip() for x in expected_raw.split(",") if x.strip()]
-                                    expected_chunks_payload = expected_ids
-                                except:
-                                    expected_ids = None
+                                expected_texts = [expected_raw]
+
                         if isinstance(expected_raw, (list, tuple)):
                             if expected_raw and isinstance(expected_raw[0], dict):
-                                expected_ids = [str(e.get("chunk_id")) for e in expected_raw if e.get("chunk_id")]
-                                expected_chunks_payload = expected_raw
+                                expected_texts = [
+                                    str(e.get("chunk_text") or e.get("text") or "")
+                                    for e in expected_raw
+                                    if isinstance(e, dict) and (e.get("chunk_text") or e.get("text"))
+                                ]
                             else:
-                                expected_ids = list(expected_raw)
-                                expected_chunks_payload = expected_ids
+                                expected_texts = [str(e) for e in expected_raw if e]
                         elif isinstance(expected_raw, dict):
                             if "expected_chunks" in expected_raw:
-                                expected_chunks_payload = expected_raw.get("expected_chunks")
-                            if "expected_chunk_ids" in expected_raw:
-                                expected_ids = expected_raw.get("expected_chunk_ids")
-                        else:
-                            expected_ids = None
+                                nested = expected_raw.get("expected_chunks")
+                                if isinstance(nested, (list, tuple)):
+                                    if nested and isinstance(nested[0], dict):
+                                        expected_texts = [
+                                            str(e.get("chunk_text") or e.get("text") or "")
+                                            for e in nested
+                                            if isinstance(e, dict) and (e.get("chunk_text") or e.get("text"))
+                                        ]
+                                    else:
+                                        expected_texts = [str(e) for e in nested if e]
+                                elif isinstance(nested, str):
+                                    expected_texts = [nested]
                     
                     # Debug first query
                     if i == 0:
                         print(f"  [DEBUG] Query {i+1}: '{qtext[:50]}...'")
-                        print(f"  [DEBUG] Expected IDs type: {type(expected_raw)}, value: {expected_raw}")
-                        print(f"  [DEBUG] Parsed expected_ids: {expected_ids}")
+                        print(f"  [DEBUG] Expected raw type: {type(expected_raw)}, value: {expected_raw}")
+                        print(f"  [DEBUG] Parsed expected_texts: {expected_texts}")
 
                     # Query index with specified query type
                     t0 = time.time()
@@ -551,12 +558,12 @@ with start_eval_parent_run(run_name=f"eval_{build_run_id[:8]}", parent_run_id=bu
 
                     # Compute metrics
                     try:
-                        if expected_ids:
-                            # Use labeled metrics if ground truth available
-                            metrics = evaluator.compute_labeled_metrics(qtext, retrieved, expected_ids, k_values=metric_k_values)
-                        else:
-                            # Use LLM judge for scoring
-                            metrics = evaluator.compute_judge_metrics(qtext, retrieved, k_values=metric_k_values)
+                        metrics = evaluator.compute_labeled_metrics_by_text(
+                            qtext,
+                            retrieved,
+                            expected_texts,
+                            k_values=metric_k_values
+                        )
                         
                         # Ensure metrics is a dict
                         if not isinstance(metrics, dict):
@@ -571,26 +578,20 @@ with start_eval_parent_run(run_name=f"eval_{build_run_id[:8]}", parent_run_id=bu
                     # Debug: Print metrics keys for first query
                     if i == 0:
                         print(f"  [DEBUG] Metrics keys: {list(metrics.keys())}")
-                        print(f"  [DEBUG] Expected IDs: {expected_ids is not None}")
+                        print(f"  [DEBUG] Expected texts: {len(expected_texts)}")
                         print(f"  [DEBUG] Retrieved chunks: {len(retrieved)}")
 
                     # Extract key metrics - handle both labeled and judge metrics
                     for k in metric_k_values:
                         recall_key = f"recall_at_{k}"
+                        precision_key = f"precision_at_{k}"
                         ndcg_key = f"ndcg_at_{k}"
-                        relevance_key = f"avg_relevance_at_{k}"
-                        judge_key = f"judge_score_at_{k}"
-
                         if recall_key in metrics:
                             recalls_by_k[k].append(float(metrics[recall_key]))
+                        if precision_key in metrics:
+                            precisions_by_k[k].append(float(metrics[precision_key]))
                         if ndcg_key in metrics:
                             ndcgs_by_k[k].append(float(metrics[ndcg_key]))
-                        
-                        if relevance_key in metrics:
-                            relevances_by_k[k].append(float(metrics[relevance_key]))
-                        elif judge_key in metrics:
-                            # Use judge_score as relevance if avg_relevance not available
-                            relevances_by_k[k].append(float(metrics[judge_key]))
                     
                     # Always append latency
                     latencies.append(latency_ms)
@@ -598,8 +599,8 @@ with start_eval_parent_run(run_name=f"eval_{build_run_id[:8]}", parent_run_id=bu
                     # Debug: Print extraction status for first query
                     if i == 0:
                         print(f"  [DEBUG] Recalls list lengths: { {k: len(v) for k, v in recalls_by_k.items()} }")
+                        print(f"  [DEBUG] Precisions list lengths: { {k: len(v) for k, v in precisions_by_k.items()} }")
                         print(f"  [DEBUG] NDCGs list lengths: { {k: len(v) for k, v in ndcgs_by_k.items()} }")
-                        print(f"  [DEBUG] Relevances list lengths: { {k: len(v) for k, v in relevances_by_k.items()} }")
                         print(f"  [DEBUG] Latencies list length: {len(latencies)}")
 
                     # Store row
@@ -613,7 +614,7 @@ with start_eval_parent_run(run_name=f"eval_{build_run_id[:8]}", parent_run_id=bu
                         "strategy": strategy_name,
                         "query_type": query_type,
                         "query_text": qtext,
-                        "expected_chunks": json.dumps(expected_chunks_payload) if expected_chunks_payload else (json.dumps(expected_ids) if expected_ids else None),
+                        "expected_chunks": json.dumps(expected_texts) if expected_texts else None,
                         "retrieved_chunks": json.dumps(retrieved),
                         "metrics": json.dumps(metrics),
                     })
@@ -628,8 +629,8 @@ with start_eval_parent_run(run_name=f"eval_{build_run_id[:8]}", parent_run_id=bu
                 # Debug: Print list statuses before logging
                 print(f"\n  [DEBUG] Before MLflow logging:")
                 print(f"    Recalls: { {k: len(v) for k, v in recalls_by_k.items()} }")
+                print(f"    Precisions: { {k: len(v) for k, v in precisions_by_k.items()} }")
                 print(f"    NDCGs: { {k: len(v) for k, v in ndcgs_by_k.items()} }")
-                print(f"    Relevances: { {k: len(v) for k, v in relevances_by_k.items()} }")
                 print(f"    Latencies: {len(latencies)} items")
                 print(f"    Queries processed: {num_queries_processed}")
                 print(f"    Active MLflow run: {mlflow.active_run() is not None}")
@@ -646,8 +647,8 @@ with start_eval_parent_run(run_name=f"eval_{build_run_id[:8]}", parent_run_id=bu
                 # Calculate and prepare recall/NDCG/relevance metrics for each k
                 for k in metric_k_values:
                     recalls = recalls_by_k.get(k, [])
+                    precisions = precisions_by_k.get(k, [])
                     ndcgs = ndcgs_by_k.get(k, [])
-                    relevances = relevances_by_k.get(k, [])
 
                     if recalls:
                         avg_recall = float(sum(recalls) / len(recalls))
@@ -657,6 +658,14 @@ with start_eval_parent_run(run_name=f"eval_{build_run_id[:8]}", parent_run_id=bu
                         metrics_to_log[f"recall_at_{k}"] = 0.0
                         print(f"  ⚠️  No recall metrics for k={k} - will log 0.0")
 
+                    if precisions:
+                        avg_precision = float(sum(precisions) / len(precisions))
+                        metrics_to_log[f"precision_at_{k}"] = avg_precision
+                        print(f"  ✅ Prepared precision_at_{k}: {avg_precision:.4f}")
+                    else:
+                        metrics_to_log[f"precision_at_{k}"] = 0.0
+                        print(f"  ⚠️  No precision metrics for k={k} - will log 0.0")
+
                     if ndcgs:
                         avg_ndcg = float(sum(ndcgs) / len(ndcgs))
                         metrics_to_log[f"ndcg_at_{k}"] = avg_ndcg
@@ -665,15 +674,6 @@ with start_eval_parent_run(run_name=f"eval_{build_run_id[:8]}", parent_run_id=bu
                         metrics_to_log[f"ndcg_at_{k}"] = 0.0
                         print(f"  ⚠️  No NDCG metrics for k={k} - will log 0.0")
 
-                    if relevances:
-                        avg_relevance = float(sum(relevances) / len(relevances))
-                        metrics_to_log[f"avg_relevance_at_{k}"] = avg_relevance
-                        metrics_to_log[f"judge_score_at_{k}"] = avg_relevance
-                        print(f"  ✅ Prepared avg_relevance_at_{k}: {avg_relevance:.4f}")
-                    else:
-                        metrics_to_log[f"avg_relevance_at_{k}"] = 0.0
-                        metrics_to_log[f"judge_score_at_{k}"] = 0.0
-                        print(f"  ⚠️  No relevance metrics for k={k} - will log 0.0")
                 
                 # Calculate and prepare latency metric (should always have data)
                 if latencies and len(latencies) > 0:
@@ -787,20 +787,7 @@ if enable_rich_analytics and all_rows:
         display(analyzer.bottom_queries(5))
 
         # High relevance examples
-        high_rel = analyzer.high_relevance_examples(5)
-        if not high_rel.empty:
-            print("\nHigh Relevance Examples (score >= 2.5):")
-            display(high_rel)
-        else:
-            print("\nNo high relevance examples found (score >= 2.5).")
-
-        # Low relevance examples
-        low_rel = analyzer.low_relevance_examples(5)
-        if not low_rel.empty:
-            print("\nLow Relevance Examples (score <= 1.0):")
-            display(low_rel)
-        else:
-            print("\nNo low relevance examples found (score <= 1.0).")
+        # Relevance examples rely on judge scores; skip for labeled-only mode.
 
 # COMMAND ----------
 # MAGIC %md
@@ -833,10 +820,7 @@ if enable_rich_analytics and compare_types and all_rows:
             display(comparison)
 
             # Determine winner
-            if "avg_relevance_at_10" in comparison.columns:
-                best = comparison.loc[comparison["avg_relevance_at_10"].idxmax(), "name"]
-                print(f"\nBest query type: {best}")
-            elif "recall_at_10" in comparison.columns:
+            if "recall_at_10" in comparison.columns:
                 best = comparison.loc[comparison["recall_at_10"].idxmax(), "name"]
                 print(f"\nBest query type: {best}")
 

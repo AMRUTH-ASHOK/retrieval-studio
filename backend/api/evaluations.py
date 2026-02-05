@@ -45,49 +45,52 @@ async def create_evaluation(
             if not eval_request.golden_dataset_table:
                 raise HTTPException(status_code=400, detail="golden_dataset_table is required when use_golden_dataset is true")
         elif auto_generate:
-            # Construct corpus_table name using the same logic as build notebook
-            # No need to query Databricks API or PostgreSQL - just pure computation
-            try:
-                from backend.utils.build_results import construct_build_results, extract_corpus_table
+            if generate_golden and not eval_request.golden_dataset_table:
+                raise HTTPException(status_code=400, detail="golden_dataset_table is required when auto_generate_queries is true")
+            if not eval_request.corpus_table:
+                # Construct corpus_table name using the same logic as build notebook
+                # No need to query Databricks API or PostgreSQL - just pure computation
+                try:
+                    from backend.utils.build_results import construct_build_results, extract_corpus_table
 
-                # Get build config to determine which strategies were enabled
-                build_config = build_run.get("config", {})
-                project_name = build_run.get("project_name")
+                    # Get build config to determine which strategies were enabled
+                    build_config = build_run.get("config", {})
+                    project_name = build_run.get("project_name")
 
-                if not project_name:
-                    raise HTTPException(status_code=400, detail="Project name not found in build record.")
+                    if not project_name:
+                        raise HTTPException(status_code=400, detail="Project name not found in build record.")
 
-                # Extract enabled strategies from config
-                strategies = []
-                if build_config.get("baseline_enabled"):
-                    strategies.append("baseline")
-                if build_config.get("semantic_enabled"):
-                    strategies.append("semantic")
-                if build_config.get("structured_enabled"):
-                    strategies.append("structured")
+                    # Extract enabled strategies from config
+                    strategies = []
+                    if build_config.get("baseline_enabled"):
+                        strategies.append("baseline")
+                    if build_config.get("semantic_enabled"):
+                        strategies.append("semantic")
+                    if build_config.get("structured_enabled"):
+                        strategies.append("structured")
 
-                if not strategies:
-                    # Default to baseline if no strategies specified
-                    strategies = ["baseline"]
+                    if not strategies:
+                        # Default to baseline if no strategies specified
+                        strategies = ["baseline"]
 
-                # Construct results using same logic as notebook (deterministic)
-                build_results = construct_build_results(
-                    project_name=project_name,
-                    strategies=strategies,
-                    catalog=settings.CATALOG,
-                    schema=settings.SCHEMA
-                )
+                    # Construct results using same logic as notebook (deterministic)
+                    build_results = construct_build_results(
+                        project_name=project_name,
+                        strategies=strategies,
+                        catalog=settings.CATALOG,
+                        schema=settings.SCHEMA
+                    )
 
-                # Extract corpus_table (prefer baseline, then semantic, then structured)
-                corpus_table = extract_corpus_table(build_results)
+                    # Extract corpus_table (prefer baseline, then semantic, then structured)
+                    corpus_table = extract_corpus_table(build_results)
 
-                # Set the auto-constructed corpus_table
-                eval_request.corpus_table = corpus_table
+                    # Set the auto-constructed corpus_table
+                    eval_request.corpus_table = corpus_table
 
-            except Exception as e:
-                if isinstance(e, HTTPException):
-                    raise
-                raise HTTPException(status_code=400, detail=f"Failed to construct corpus table: {str(e)}")
+                except Exception as e:
+                    if isinstance(e, HTTPException):
+                        raise
+                    raise HTTPException(status_code=400, detail=f"Failed to construct corpus table: {str(e)}")
         else:
             if not eval_request.queries_table:
                 raise HTTPException(status_code=400, detail="queries_table is required when auto_generate_queries is false")
@@ -245,8 +248,24 @@ async def get_evaluation_results(run_id: str, sql_connector=Depends(get_sql_conn
         # Check against build_run_id (parent), eval_id, eval_run_id (eval parent/child), or build_child_run_id (strategy)
         run_id_safe = sanitize_string(run_id)
 
+        # First check if the table exists
+        table_name = f"{escape_identifier(settings.CATALOG)}.raw.rs_eval_results"
+        try:
+            # Try to select from the table to see if it exists
+            check_query = f"SELECT 1 FROM {table_name} LIMIT 1"
+            sql_connector.execute(check_query)
+        except Exception as table_check_error:
+            # Table likely doesn't exist
+            error_str = str(table_check_error).lower()
+            if "table_or_view_not_found" in error_str or "table not found" in error_str or "does not exist" in error_str:
+                # Return empty results instead of 500 error
+                print(f"Table {table_name} does not exist yet. Returning empty results.")
+                return []
+            # Re-raise if it's a different error
+            raise
+
         query = f"""
-            SELECT * FROM {escape_identifier(settings.CATALOG)}.raw.rs_eval_results
+            SELECT * FROM {table_name}
             WHERE build_run_id = ?
                OR eval_id = ?
                OR eval_run_id = ?
@@ -256,10 +275,14 @@ async def get_evaluation_results(run_id: str, sql_connector=Depends(get_sql_conn
 
         # Pass run_id 4 times for the 4 placeholders
         results = sql_connector.execute(query, [run_id_safe, run_id_safe, run_id_safe, run_id_safe])
-        return results
+        return results if results else []
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # Log the full error for debugging
+        print(f"Error in get_evaluation_results: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve evaluation results: {str(e)}")
 
 
 @router.get("/build/{build_run_id}", response_model=List[EvaluationResponse])

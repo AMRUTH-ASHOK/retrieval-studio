@@ -61,6 +61,88 @@ class RetrievalEvaluator:
             metrics[f"ndcg_at_{k}"] = ndcg
         
         return metrics
+
+    def _normalize_text(self, text: str) -> str:
+        if not text:
+            return ""
+        return " ".join(str(text).lower().split())
+
+    def _compute_ndcg_from_relevances(self, relevances: List[int], k: int, expected_count: int) -> float:
+        if k <= 0:
+            return 0.0
+        if not relevances:
+            return 0.0
+
+        dcg = 0.0
+        for i, rel in enumerate(relevances[:k]):
+            if rel:
+                dcg += 1.0 / np.log2(i + 2)
+
+        ideal_len = min(expected_count, k)
+        if ideal_len == 0:
+            return 0.0
+
+        idcg = 0.0
+        for i in range(ideal_len):
+            idcg += 1.0 / np.log2(i + 2)
+
+        return dcg / idcg if idcg > 0 else 0.0
+
+    def compute_labeled_metrics_by_text(
+        self,
+        query_text: str,
+        retrieved_chunks: List[Dict],
+        expected_chunk_texts: List[str],
+        k_values: List[int] = [5, 10]
+    ) -> Dict[str, float]:
+        """
+        Compute labeled metrics using expected chunk text. A retrieved chunk is
+        considered relevant if the expected chunk text is a substring of the
+        retrieved chunk text (case-insensitive, whitespace-normalized).
+        """
+        metrics: Dict[str, float] = {}
+
+        expected_norm = [
+            self._normalize_text(t)
+            for t in (expected_chunk_texts or [])
+            if t
+        ]
+        # De-duplicate while preserving order
+        seen = set()
+        expected_norm = [t for t in expected_norm if not (t in seen or seen.add(t))]
+
+        retrieved_texts = [
+            self._normalize_text(chunk.get("chunk_text") or chunk.get("text") or "")
+            for chunk in retrieved_chunks
+        ]
+
+        for k in k_values:
+            top_texts = retrieved_texts[:k]
+            if not expected_norm:
+                metrics[f"recall_at_{k}"] = 0.0
+                metrics[f"precision_at_{k}"] = 0.0
+                metrics[f"ndcg_at_{k}"] = 0.0
+                continue
+
+            matched_expected = set()
+            retrieved_relevance = []
+            for rt in top_texts:
+                is_relevant = False
+                for idx, exp in enumerate(expected_norm):
+                    if exp and exp in rt:
+                        matched_expected.add(idx)
+                        is_relevant = True
+                retrieved_relevance.append(1 if is_relevant else 0)
+
+            recall = len(matched_expected) / len(expected_norm) if expected_norm else 0.0
+            precision = (sum(retrieved_relevance) / k) if k > 0 else 0.0
+            ndcg = self._compute_ndcg_from_relevances(retrieved_relevance, k, len(expected_norm))
+
+            metrics[f"recall_at_{k}"] = recall
+            metrics[f"precision_at_{k}"] = precision
+            metrics[f"ndcg_at_{k}"] = ndcg
+
+        return metrics
     
     def compute_judge_metrics(
         self,

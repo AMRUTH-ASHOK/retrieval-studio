@@ -200,8 +200,17 @@ export default function Review() {
 
   const loadQueryDetails = async (evalId: string) => {
     setIsLoadingDetails(true)
+    setError(null)
     try {
       const results = await evaluationsApi.getResults(evalId)
+
+      if (!results || results.length === 0) {
+        setQueryDetails([])
+        setSelectedDetailsEvalId(evalId)
+        setError('No query results found. The evaluation may still be running, or the results table may not have been created yet. Check the job status to ensure it completed successfully.')
+        return
+      }
+
       const parsed = results.map((row: any) => {
         const parseJson = (value: any) => {
           if (!value) return null
@@ -223,9 +232,10 @@ export default function Review() {
 
       setQueryDetails(parsed)
       setSelectedDetailsEvalId(evalId)
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to load query details:', error)
       setQueryDetails([])
+      setError(error?.response?.data?.detail || 'Failed to load query details. Please check if the evaluation completed successfully.')
     } finally {
       setIsLoadingDetails(false)
     }
@@ -652,8 +662,17 @@ export default function Review() {
                   </div>
 
                   {queryDetails.length === 0 && !isLoadingDetails && (
-                    <div className="text-center py-8 text-sm text-databricks-gray-600">
-                      No query details loaded yet.
+                    <div className="text-center py-8">
+                      {error ? (
+                        <div className="p-4 bg-yellow-50 border border-yellow-200 rounded-md text-left">
+                          <p className="text-sm font-medium text-yellow-800 mb-1">No Results Available</p>
+                          <p className="text-xs text-yellow-700">{error}</p>
+                        </div>
+                      ) : (
+                        <p className="text-sm text-databricks-gray-600">
+                          Click "Load Details" to fetch query-level results for the selected evaluation.
+                        </p>
+                      )}
                     </div>
                   )}
 
