@@ -371,9 +371,55 @@ export function getMetricColor(value: number, metricKey: keyof AggregatedMetrics
     if (value < 500) return 'text-yellow-600 bg-yellow-50'
     return 'text-red-600 bg-red-50'
   } else {
-    // Quality metrics (recall, ndcg, relevance)
     if (value >= 0.8) return 'text-green-600 bg-green-50'
     if (value >= 0.5) return 'text-yellow-600 bg-yellow-50'
     return 'text-red-600 bg-red-50'
   }
+}
+
+export type SourceMetrics = {
+  source_name: string
+  source_type: string
+  strategies: {
+    strategy_name: string
+    query_type: string
+    metrics: AggregatedMetrics
+  }[]
+  best_strategy: string | null
+}
+
+export function aggregateBySource(runs: MLflowRun[]): SourceMetrics[] {
+  const groups: Record<string, SourceMetrics> = {}
+
+  const evalRuns = runs.filter(r => r.role === 'eval_strategy')
+
+  for (const run of evalRuns) {
+    const sourceName = run.params?.source_name || 'all_sources'
+    const sourceType = run.params?.source_type || ''
+    const strategyName = run.params?.strategy_name || 'unknown'
+    const queryType = run.params?.query_type || 'ANN'
+
+    if (!groups[sourceName]) {
+      groups[sourceName] = { source_name: sourceName, source_type: sourceType, strategies: [], best_strategy: null }
+    }
+
+    groups[sourceName].strategies.push({
+      strategy_name: strategyName,
+      query_type: queryType,
+      metrics: run.metrics as AggregatedMetrics
+    })
+  }
+
+  for (const group of Object.values(groups)) {
+    let bestRecall = -1
+    for (const s of group.strategies) {
+      const recall = (s.metrics as any).recall_at_10 || 0
+      if (recall > bestRecall) {
+        bestRecall = recall
+        group.best_strategy = s.strategy_name
+      }
+    }
+  }
+
+  return Object.values(groups)
 }

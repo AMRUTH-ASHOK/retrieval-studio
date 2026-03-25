@@ -88,6 +88,7 @@ def submit_eval_job(
     schema: str,
     queries_table: str = None,
     corpus_table: str = None,
+    corpus_tables: list = None,
     dataset_type: str = "delta_table",
     top_k: int = 10,
     auto_generate_queries: bool = False,
@@ -150,11 +151,12 @@ def submit_eval_job(
         if build_parent_run_id:
             base_parameters["build_parent_run_id"] = str(build_parent_run_id)
         
-        # Add optional parameters
         if queries_table:
             base_parameters["queries_table"] = queries_table
         if corpus_table:
             base_parameters["corpus_table"] = corpus_table
+        if corpus_tables:
+            base_parameters["corpus_tables"] = json.dumps(corpus_tables)
         if judge_model_endpoint:
             base_parameters["judge_model_endpoint"] = judge_model_endpoint
         if generate_golden_dataset:
@@ -197,6 +199,46 @@ def submit_eval_job(
     except Exception as e:
         raise JobSubmissionError(
             handle_error(e, "Failed to submit eval job", show_traceback=False)
+        ) from e
+
+
+def submit_cleanup_job(
+    w: WorkspaceClient,
+    notebook_path: str,
+    cleanup_config: dict,
+    catalog: str,
+    schema: str,
+    timeout_minutes: int = 30,
+) -> int:
+    """Submit cleanup job to delete VS indexes and delta tables"""
+    try:
+        base_parameters = {
+            "cleanup_config": json.dumps(cleanup_config),
+            "catalog": catalog,
+            "schema": schema,
+        }
+
+        timeout_seconds = (timeout_minutes + 15) * 60
+
+        task = Task(
+            task_key="cleanup",
+            notebook_task=NotebookTask(
+                notebook_path=notebook_path,
+                base_parameters=base_parameters
+            ),
+            timeout_seconds=timeout_seconds
+        )
+
+        run = w.jobs.submit(
+            run_name=f"RetrievalStudio-Cleanup-{cleanup_config.get('project_id', 'unknown')[:8]}",
+            tasks=[task]
+        )
+
+        return run.run_id
+
+    except Exception as e:
+        raise JobSubmissionError(
+            handle_error(e, "Failed to submit cleanup job", show_traceback=False)
         ) from e
 
 

@@ -465,10 +465,167 @@ def get_experiment_id_for_project(project_id: str) -> Optional[str]:
 
 
 # ============================================================================
+# INDEX SELECTION OPERATIONS
+# ============================================================================
+
+def create_index_selection(
+    project_id: str,
+    build_run_id: str,
+    source_name: str,
+    strategy_name: str,
+    index_name: str,
+    chunks_table: str,
+    vs_endpoint: str,
+    status: str = "active"
+) -> Dict[str, Any]:
+    """Create an index selection record"""
+    connector = get_postgres_connector()
+
+    sel_id = str(uuid.uuid4())
+    query = """
+        INSERT INTO index_selections (
+            id, project_id, build_run_id, source_name, strategy_name,
+            index_name, chunks_table, vs_endpoint, status
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (id) DO NOTHING
+        RETURNING *
+    """
+    result = connector.execute(
+        query,
+        (sel_id, project_id, build_run_id, source_name, strategy_name,
+         index_name, chunks_table, vs_endpoint, status),
+        fetch="one"
+    )
+    return result or {}
+
+
+def get_index_selections(project_id: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Get all index selections for a project"""
+    connector = get_postgres_connector()
+
+    if status:
+        query = "SELECT * FROM index_selections WHERE project_id = %s AND status = %s ORDER BY created_at DESC"
+        return connector.execute(query, (project_id, status))
+    else:
+        query = "SELECT * FROM index_selections WHERE project_id = %s ORDER BY created_at DESC"
+        return connector.execute(query, (project_id,))
+
+
+def update_index_selection_status(selection_id: str, status: str) -> Optional[Dict[str, Any]]:
+    """Update an index selection status"""
+    connector = get_postgres_connector()
+
+    query = """
+        UPDATE index_selections SET status = %s
+        WHERE id = %s
+        RETURNING *
+    """
+    return connector.execute(query, (status, selection_id), fetch="one")
+
+
+def bulk_update_index_status(project_id: str, updates: List[Dict[str, str]]) -> int:
+    """Bulk update index statuses. updates = [{"id": ..., "status": ...}]"""
+    connector = get_postgres_connector()
+    count = 0
+    for upd in updates:
+        result = connector.execute(
+            "UPDATE index_selections SET status = %s WHERE id = %s AND project_id = %s RETURNING id",
+            (upd["status"], upd["id"], project_id),
+            fetch="one"
+        )
+        if result:
+            count += 1
+    return count
+
+
+# ============================================================================
+# STUDY OPERATIONS
+# ============================================================================
+
+def create_study(
+    project_id: str,
+    study_name: str,
+    description: Optional[str] = None
+) -> Dict[str, Any]:
+    """Create a new study within a project"""
+    connector = get_postgres_connector()
+    study_id = str(uuid.uuid4())
+    query = """
+        INSERT INTO studies (study_id, project_id, study_name, description)
+        VALUES (%s, %s, %s, %s)
+        RETURNING *
+    """
+    return connector.execute(query, (study_id, project_id, study_name, description), fetch="one")
+
+
+def get_studies(project_id: str) -> List[Dict[str, Any]]:
+    """Get all studies for a project"""
+    connector = get_postgres_connector()
+    return connector.execute(
+        "SELECT * FROM studies WHERE project_id = %s ORDER BY created_at DESC",
+        (project_id,)
+    )
+
+
+def get_study(study_id: str) -> Optional[Dict[str, Any]]:
+    """Get a study by ID"""
+    connector = get_postgres_connector()
+    return connector.execute("SELECT * FROM studies WHERE study_id = %s", (study_id,), fetch="one")
+
+
+def delete_study(study_id: str) -> bool:
+    """Delete a study"""
+    connector = get_postgres_connector()
+    result = connector.execute("DELETE FROM studies WHERE study_id = %s RETURNING study_id", (study_id,), fetch="one")
+    return result is not None
+
+
+def add_build_to_study(study_id: str, build_run_id: str):
+    """Associate a build with a study"""
+    connector = get_postgres_connector()
+    connector.execute(
+        "INSERT INTO study_builds (study_id, build_run_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+        (study_id, build_run_id),
+        fetch="none"
+    )
+
+
+def add_evaluation_to_study(study_id: str, eval_id: str):
+    """Associate an evaluation with a study"""
+    connector = get_postgres_connector()
+    connector.execute(
+        "INSERT INTO study_evaluations (study_id, eval_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+        (study_id, eval_id),
+        fetch="none"
+    )
+
+
+def get_study_builds(study_id: str) -> List[Dict[str, Any]]:
+    """Get all builds for a study"""
+    connector = get_postgres_connector()
+    return connector.execute(
+        """SELECT b.* FROM builds b
+           JOIN study_builds sb ON b.run_id = sb.build_run_id
+           WHERE sb.study_id = %s ORDER BY b.created_at DESC""",
+        (study_id,)
+    )
+
+
+def get_study_evaluations(study_id: str) -> List[Dict[str, Any]]:
+    """Get all evaluations for a study"""
+    connector = get_postgres_connector()
+    return connector.execute(
+        """SELECT e.* FROM evaluations e
+           JOIN study_evaluations se ON e.eval_id = se.eval_id
+           WHERE se.study_id = %s ORDER BY e.created_at DESC""",
+        (study_id,)
+    )
+
+
+# ============================================================================
 # BACKWARD COMPATIBILITY ALIASES
 # ============================================================================
 
-# Aliases for backward compatibility with old state.py API
 create_run = create_build
 get_run = get_build
 get_runs_by_project = get_builds_by_project

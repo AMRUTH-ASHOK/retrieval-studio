@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { PlayCircle, ExternalLink, Clock } from 'lucide-react'
+import { PlayCircle, ExternalLink, Clock, Upload, File, X } from 'lucide-react'
 import { evaluationsApi } from '../services/evaluations'
 import { buildsApi } from '../services/builds'
+import { uploadsApi } from '../services/uploads'
 import { useProject } from '../context/ProjectContext'
 import { Button } from '../components/ui/Button'
 import { Input } from '../components/ui/Input'
@@ -32,7 +33,9 @@ export default function Evaluate() {
   } | null>(null)
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const statusCardRef = useRef<HTMLDivElement | null>(null)
-  const [evaluationMode, setEvaluationMode] = useState<'existing' | 'auto-generate'>('existing')
+  const [evaluationMode, setEvaluationMode] = useState<'existing' | 'auto-generate' | 'upload'>('existing')
+  const [uploadedGoldenFile, setUploadedGoldenFile] = useState<File | null>(null)
+  const [goldenUploadPath, setGoldenUploadPath] = useState<string | null>(null)
 
   useEffect(() => {
     if (selectedProjectId) {
@@ -171,15 +174,24 @@ export default function Evaluate() {
     }
 
     const isAutoGenerate = evaluationMode === 'auto-generate'
+    const isUpload = evaluationMode === 'upload'
 
-    if (!isAutoGenerate && !existingGoldenTable) {
+    if (evaluationMode === 'existing' && !existingGoldenTable) {
       setError('Please provide the golden dataset table')
       return
     }
 
-    if (isAutoGenerate) {
-      if (!goldenDatasetTable) {
-        setError('Please provide the golden dataset table')
+    if ((isAutoGenerate || isUpload) && !goldenDatasetTable) {
+      setError('Please provide the golden dataset table')
+      return
+    }
+
+    if (isUpload && uploadedGoldenFile && selectedProject) {
+      try {
+        await uploadsApi.uploadFiles([uploadedGoldenFile], selectedProject.project_name)
+        setGoldenUploadPath(goldenDatasetTable)
+      } catch {
+        setError('Failed to upload golden dataset file')
         return
       }
     }
@@ -196,11 +208,13 @@ export default function Evaluate() {
 
       if (isAutoGenerate) {
         submitData.auto_generate_queries = true
-        // corpus_table is auto-detected from build's baseline table by backend
         submitData.generate_golden_dataset = true
         submitData.golden_dataset_table = goldenDatasetTable
         submitData.num_queries = DEFAULT_NUM_QUERIES
         submitData.query_style = DEFAULT_QUERY_STYLE
+      } else if (isUpload) {
+        submitData.use_golden_dataset = true
+        submitData.golden_dataset_table = goldenDatasetTable
       } else {
         submitData.use_golden_dataset = true
         submitData.golden_dataset_table = existingGoldenTable
@@ -370,7 +384,35 @@ export default function Evaluate() {
                       Option 2: Auto-Generate Queries (Auto-Golden)
                     </div>
                     <p className="text-sm text-databricks-gray-600 mt-1">
-                      Generate queries from your build's baseline table and auto-create the golden dataset (defaults: {DEFAULT_NUM_QUERIES} {DEFAULT_QUERY_STYLE} queries).
+                      Generate queries from your build's tables and auto-create the golden dataset (defaults: {DEFAULT_NUM_QUERIES} {DEFAULT_QUERY_STYLE} queries). For per-source builds, samples from ALL source tables.
+                    </p>
+                  </div>
+                </label>
+
+                <div className="flex items-center gap-3">
+                  <div className="flex-1 border-t border-gray-300"></div>
+                  <span className="text-xs font-medium text-gray-500 uppercase tracking-wider">OR</span>
+                  <div className="flex-1 border-t border-gray-300"></div>
+                </div>
+
+                <label className="flex items-start p-5 border-2 rounded-lg cursor-pointer hover:bg-gray-50 transition-all shadow-sm"
+                  style={{
+                    borderColor: evaluationMode === 'upload' ? '#2196F3' : '#E5E7EB',
+                    backgroundColor: evaluationMode === 'upload' ? '#F0F9FF' : 'white'
+                  }}>
+                  <input
+                    type="radio"
+                    name="evaluationMode"
+                    checked={evaluationMode === 'upload'}
+                    onChange={() => setEvaluationMode('upload')}
+                    className="mt-1 w-4 h-4 text-databricks-blue border-gray-300 focus:ring-databricks-blue"
+                  />
+                  <div className="ml-3 flex-1">
+                    <div className="font-semibold text-databricks-gray-900 text-base">
+                      Option 3: Upload Golden Dataset (CSV/JSON)
+                    </div>
+                    <p className="text-sm text-databricks-gray-600 mt-1">
+                      Upload a CSV or JSON file with <code className="bg-gray-100 px-1 rounded">query_text</code> and <code className="bg-gray-100 px-1 rounded">expected_chunks</code> columns.
                     </p>
                   </div>
                 </label>
@@ -393,15 +435,46 @@ export default function Evaluate() {
                     helperText="Must include query_text and expected_chunks (chunk text only)"
                   />
                 </div>
-              ) : (
+              ) : evaluationMode === 'auto-generate' ? (
                 <div className="space-y-4 p-5 bg-green-50 border border-green-200 rounded-lg">
                   <Input
                     label="Golden Dataset Table (Delta)"
                     value={goldenDatasetTable}
                     onChange={(e) => setGoldenDatasetTable(e.target.value)}
                     placeholder="catalog.schema.rs_golden_project"
-                    helperText="Where generated queries + labels will be stored. Corpus table is auto-detected from your build's baseline table."
+                    helperText="Where generated queries + labels will be stored. Corpus tables are auto-detected from your build's sources."
                   />
+                </div>
+              ) : (
+                <div className="space-y-4 p-5 bg-purple-50 border border-purple-200 rounded-lg">
+                  <Input
+                    label="Golden Dataset Table (Delta)"
+                    value={goldenDatasetTable}
+                    onChange={(e) => setGoldenDatasetTable(e.target.value)}
+                    placeholder="catalog.schema.rs_golden_project"
+                    helperText="Delta table where the uploaded dataset will be stored."
+                  />
+                  <div>
+                    <label className="block text-sm font-medium text-databricks-gray-700 mb-2">Upload Golden Dataset File</label>
+                    {uploadedGoldenFile ? (
+                      <div className="flex items-center gap-3 p-3 bg-white border border-purple-200 rounded-md">
+                        <File className="w-4 h-4 text-purple-600" />
+                        <span className="text-sm text-databricks-gray-800 flex-1">{uploadedGoldenFile.name}</span>
+                        <button onClick={() => { setUploadedGoldenFile(null); setGoldenUploadPath(null) }}
+                          className="text-databricks-gray-400 hover:text-databricks-error"><X className="w-4 h-4" /></button>
+                      </div>
+                    ) : (
+                      <div onClick={() => {
+                        const input = document.createElement('input'); input.type = 'file'; input.accept = '.csv,.json';
+                        input.onchange = () => { if (input.files?.[0]) setUploadedGoldenFile(input.files[0]) }; input.click()
+                      }}
+                        className="border-2 border-dashed border-purple-300 rounded-lg p-6 text-center cursor-pointer hover:border-purple-500 hover:bg-purple-50 transition-all">
+                        <Upload className="w-8 h-8 mx-auto mb-2 text-purple-400" />
+                        <p className="text-sm text-databricks-gray-600">Click to upload CSV or JSON file</p>
+                        <p className="text-xs text-databricks-gray-400 mt-1">Must have query_text and expected_chunks columns</p>
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
@@ -454,7 +527,8 @@ export default function Evaluate() {
                 !selectedRunId ||
                 isSubmitting ||
                 (evaluationMode === 'existing' && !existingGoldenTable) ||
-                (evaluationMode === 'auto-generate' && !goldenDatasetTable)
+                (evaluationMode === 'auto-generate' && !goldenDatasetTable) ||
+                (evaluationMode === 'upload' && (!goldenDatasetTable || !uploadedGoldenFile))
               }
               icon={<PlayCircle className="w-4 h-4" />}
               className="w-full"

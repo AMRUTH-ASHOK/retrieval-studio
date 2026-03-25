@@ -113,13 +113,66 @@ CREATE TRIGGER update_builds_updated_at BEFORE UPDATE ON builds
 CREATE TRIGGER update_evaluations_updated_at BEFORE UPDATE ON evaluations
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
+-- Index selections table (tracks VS indexes and delta tables created by builds)
+CREATE TABLE IF NOT EXISTS index_selections (
+    id VARCHAR(50) PRIMARY KEY,
+    project_id VARCHAR(50) REFERENCES projects(project_id) ON DELETE CASCADE,
+    build_run_id VARCHAR(50),
+    source_name VARCHAR(255),
+    strategy_name VARCHAR(255),
+    index_name VARCHAR(500),
+    chunks_table VARCHAR(500),
+    vs_endpoint VARCHAR(255),
+    status VARCHAR(50) DEFAULT 'active',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_index_selections_project ON index_selections(project_id);
+CREATE INDEX IF NOT EXISTS idx_index_selections_status ON index_selections(status);
+
+CREATE TRIGGER update_index_selections_updated_at BEFORE UPDATE ON index_selections
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- Studies table (groups builds and evaluations within a project)
+CREATE TABLE IF NOT EXISTS studies (
+    study_id VARCHAR(50) PRIMARY KEY,
+    project_id VARCHAR(50) REFERENCES projects(project_id) ON DELETE CASCADE,
+    study_name VARCHAR(255) NOT NULL,
+    description TEXT,
+    status VARCHAR(50) DEFAULT 'active',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_studies_project ON studies(project_id);
+
+CREATE TRIGGER update_studies_updated_at BEFORE UPDATE ON studies
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- Study-build association table
+CREATE TABLE IF NOT EXISTS study_builds (
+    study_id VARCHAR(50) REFERENCES studies(study_id) ON DELETE CASCADE,
+    build_run_id VARCHAR(50) REFERENCES builds(run_id) ON DELETE CASCADE,
+    PRIMARY KEY (study_id, build_run_id)
+);
+
+-- Study-evaluation association table
+CREATE TABLE IF NOT EXISTS study_evaluations (
+    study_id VARCHAR(50) REFERENCES studies(study_id) ON DELETE CASCADE,
+    eval_id VARCHAR(50) REFERENCES evaluations(eval_id) ON DELETE CASCADE,
+    PRIMARY KEY (study_id, eval_id)
+);
+
 -- Comments for documentation
 COMMENT ON TABLE projects IS 'Stores project metadata and configuration';
 COMMENT ON TABLE builds IS 'Tracks build job submissions and status';
 COMMENT ON TABLE evaluations IS 'Tracks evaluation job submissions and status';
 COMMENT ON TABLE job_runs IS 'Detailed job execution tracking for status polling';
+COMMENT ON TABLE index_selections IS 'Tracks VS indexes and delta tables for lifecycle management';
+COMMENT ON TABLE studies IS 'Groups related builds and evaluations within a project';
 
-COMMENT ON COLUMN builds.config IS 'JSONB field storing build configuration (data_type, strategies, etc)';
+COMMENT ON COLUMN builds.config IS 'JSONB field storing build configuration (sources, strategies, etc)';
 COMMENT ON COLUMN builds.experiment_id IS 'MLflow experiment ID where runs for this build are stored';
 COMMENT ON COLUMN evaluations.auto_generate_queries IS 'Whether queries were auto-generated from corpus';
 COMMENT ON COLUMN evaluations.compare_query_types IS 'Whether to compare FULL_TEXT, ANN, HYBRID';

@@ -56,19 +56,25 @@ class Config:
 
     # Stable per-project tables
     @classmethod
-    def chunks_table(cls, project_name: str, strategy: str) -> str:
+    def chunks_table(cls, project_name: str, strategy: str, source_name: str = None) -> str:
         p = cls._safe_name(project_name).lower()
         s = cls._safe_name(strategy).lower()
+        if source_name:
+            src = cls._safe_name(source_name).lower()
+            return cls.fq_table(cls.CHUNKS_SCHEMA, f"rs_chunks_{p}_{src}_{s}")
         return cls.fq_table(cls.CHUNKS_SCHEMA, f"rs_chunks_{p}_{s}")
 
     @classmethod
-    def chunks_indexable_table(cls, project_name: str, strategy: str) -> str:
-        return cls.chunks_table(project_name, strategy) + "__indexable"
+    def chunks_indexable_table(cls, project_name: str, strategy: str, source_name: str = None) -> str:
+        return cls.chunks_table(project_name, strategy, source_name) + "__indexable"
 
     @classmethod
-    def index_name(cls, project_name: str, strategy: str) -> str:
+    def index_name(cls, project_name: str, strategy: str, source_name: str = None) -> str:
         p = cls._safe_name(project_name).lower()
         s = cls._safe_name(strategy).lower()
+        if source_name:
+            src = cls._safe_name(source_name).lower()
+            return cls.fq_table(cls.INDEXES_SCHEMA, f"rs_index_{p}_{src}_{s}")
         return cls.fq_table(cls.INDEXES_SCHEMA, f"rs_index_{p}_{s}")
 
     @classmethod

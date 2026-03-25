@@ -24,7 +24,8 @@ dbutils.widgets.text("golden_strategy", "")
 dbutils.widgets.text("golden_query_type", "ANN")
 dbutils.widgets.text("golden_top_k", "")
 dbutils.widgets.text("project_name", "default")
-dbutils.widgets.text("corpus_table", "")  # Optional: for auto query generation
+dbutils.widgets.text("corpus_table", "")  # Optional: for auto query generation (single table, legacy)
+dbutils.widgets.text("corpus_tables", "")  # Optional: JSON list of {table, source_name} for multi-corpus
 dbutils.widgets.text("queries_table", "")  # Optional: for manual queries
 dbutils.widgets.text("dataset_type", "delta_table")
 dbutils.widgets.text("top_k", "10")
@@ -150,34 +151,63 @@ if use_golden_dataset:
     print(f"Loaded {len(query_rows)} queries from golden dataset {golden_dataset_table} (id={golden_dataset_id})")
 
 elif auto_generate:
-    # Automated Query Generation
-    corpus_table = dbutils.widgets.get("corpus_table")
-    if not corpus_table:
-        raise ValueError("corpus_table required for auto query generation")
+    # Automated Query Generation (supports multi-corpus)
+    corpus_tables_json = dbutils.widgets.get("corpus_tables") or ""
+    corpus_table = dbutils.widgets.get("corpus_table") or ""
 
     num_queries = int(dbutils.widgets.get("num_queries") or "50")
     query_style = dbutils.widgets.get("query_style") or "keyword"
 
-    print(f"Generating {num_queries} {query_style} queries from {corpus_table}...")
-
     generator = QueryGenerator(random_seed=42)
 
-    # Optional: Set few-shot examples for better query generation
-    # generator.set_few_shot_examples([
-    #     {"document": "Example document text...", "query": "example query"}
-    # ])
+    # Multi-corpus: sample proportionally from all tables
+    if corpus_tables_json:
+        import json as _json
+        corpus_list = _json.loads(corpus_tables_json)
+        print(f"Multi-corpus generation: {len(corpus_list)} tables, {num_queries} total queries")
 
-    # Generate queries
-    queries_df = generator.generate_queries(
-        corpus_table=corpus_table,
-        columns=["chunk_text"],  # Chunks table uses chunk_text column
-        num_queries=num_queries,
-        style=query_style,
-        spark_session=spark
-    )
+        all_query_rows = []
+        queries_per_table = max(1, num_queries // len(corpus_list))
 
-    query_rows = queries_df.select("query_text", "doc_id").collect()
-    print(f"Generated {len(query_rows)} queries")
+        for i, ct_info in enumerate(corpus_list):
+            ct_table = ct_info["table"]
+            ct_source = ct_info.get("source_name", f"source_{i}")
+            n = queries_per_table if i < len(corpus_list) - 1 else (num_queries - len(all_query_rows))
+            n = max(1, n)
+
+            print(f"  Generating {n} queries from {ct_table} (source: {ct_source})...")
+            try:
+                ct_df = generator.generate_queries(
+                    corpus_table=ct_table,
+                    columns=["chunk_text"],
+                    num_queries=n,
+                    style=query_style,
+                    spark_session=spark
+                )
+                ct_rows = ct_df.select("query_text", "doc_id").collect()
+                all_query_rows.extend(ct_rows)
+                print(f"  Generated {len(ct_rows)} queries from {ct_source}")
+            except Exception as e:
+                print(f"  [WARNING] Failed to generate from {ct_table}: {e}")
+
+        query_rows = all_query_rows
+        print(f"Total generated: {len(query_rows)} queries from {len(corpus_list)} tables")
+
+    elif corpus_table:
+        print(f"Generating {num_queries} {query_style} queries from {corpus_table}...")
+
+        queries_df = generator.generate_queries(
+            corpus_table=corpus_table,
+            columns=["chunk_text"],
+            num_queries=num_queries,
+            style=query_style,
+            spark_session=spark
+        )
+
+        query_rows = queries_df.select("query_text", "doc_id").collect()
+        print(f"Generated {len(query_rows)} queries")
+    else:
+        raise ValueError("corpus_table or corpus_tables required for auto query generation")
 
 else:
     # Manual Query Dataset

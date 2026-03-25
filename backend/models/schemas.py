@@ -1,7 +1,7 @@
 """
 Pydantic models for API request/response
 """
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 
@@ -19,13 +19,39 @@ class ProjectResponse(BaseModel):
     updated_at: datetime
 
 
-class BuildJobConfig(BaseModel):
-    data_type: str
-    data_config: Dict[str, Any]
+class SourceConfig(BaseModel):
+    source_name: str
+    source_type: str
+    config: Dict[str, Any]
     strategies: Dict[str, Dict[str, Any]]
+
+    @model_validator(mode='after')
+    def validate_source(self) -> 'SourceConfig':
+        import re
+        valid_types = {'pdf', 'csv', 'json', 'text', 'docx', 'delta_table', 'uc_volume'}
+        if self.source_type not in valid_types:
+            raise ValueError(f"source_type must be one of {valid_types}, got '{self.source_type}'")
+        if not re.match(r'^[a-zA-Z0-9_\-]+$', self.source_name):
+            raise ValueError(f"source_name must be alphanumeric with underscores/hyphens, got '{self.source_name}'")
+        if not self.strategies:
+            raise ValueError(f"At least one strategy is required for source '{self.source_name}'")
+        return self
+
+
+class BuildJobConfig(BaseModel):
+    sources: List[SourceConfig]
     embedding_model_endpoint: str
     vs_endpoint_name: str
     create_index: bool = True
+
+    @model_validator(mode='after')
+    def validate_sources(self) -> 'BuildJobConfig':
+        if not self.sources:
+            raise ValueError("At least one source is required")
+        names = [s.source_name for s in self.sources]
+        if len(names) != len(set(names)):
+            raise ValueError("Source names must be unique within a build")
+        return self
 
 
 class BuildJobCreate(BaseModel):

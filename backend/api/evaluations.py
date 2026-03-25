@@ -38,7 +38,8 @@ async def create_evaluation(
         use_golden = eval_request.use_golden_dataset or False
         generate_golden = eval_request.generate_golden_dataset or False
         
-        # Validate required parameters based on mode
+        corpus_tables_list = None
+
         if generate_golden and use_golden:
             raise HTTPException(status_code=400, detail="generate_golden_dataset and use_golden_dataset cannot both be true")
         if use_golden:
@@ -48,44 +49,36 @@ async def create_evaluation(
             if generate_golden and not eval_request.golden_dataset_table:
                 raise HTTPException(status_code=400, detail="golden_dataset_table is required when auto_generate_queries is true")
             if not eval_request.corpus_table:
-                # Construct corpus_table name using the same logic as build notebook
-                # No need to query Databricks API or PostgreSQL - just pure computation
                 try:
-                    from backend.utils.build_results import construct_build_results, extract_corpus_table
+                    from backend.utils.build_results import construct_build_results, extract_corpus_tables, extract_corpus_table
 
-                    # Get build config to determine which strategies were enabled
                     build_config = build_run.get("config", {})
                     project_name = build_run.get("project_name")
 
                     if not project_name:
                         raise HTTPException(status_code=400, detail="Project name not found in build record.")
 
-                    # Extract enabled strategies from config
-                    strategies = []
-                    if build_config.get("baseline_enabled"):
-                        strategies.append("baseline")
-                    if build_config.get("semantic_enabled"):
-                        strategies.append("semantic")
-                    if build_config.get("structured_enabled"):
-                        strategies.append("structured")
-
-                    if not strategies:
-                        # Default to baseline if no strategies specified
-                        strategies = ["baseline"]
-
-                    # Construct results using same logic as notebook (deterministic)
-                    build_results = construct_build_results(
-                        project_name=project_name,
-                        strategies=strategies,
-                        catalog=settings.CATALOG,
-                        schema=settings.SCHEMA
-                    )
-
-                    # Extract corpus_table (prefer baseline, then semantic, then structured)
-                    corpus_table = extract_corpus_table(build_results)
-
-                    # Set the auto-constructed corpus_table
-                    eval_request.corpus_table = corpus_table
+                    build_sources = build_config.get("sources", [])
+                    if build_sources:
+                        build_results = construct_build_results(
+                            project_name=project_name,
+                            strategies=[],
+                            catalog=settings.CATALOG,
+                            schema=settings.SCHEMA,
+                            sources=build_sources
+                        )
+                        corpus_tables_list = extract_corpus_tables(build_results)
+                        if corpus_tables_list:
+                            eval_request.corpus_table = corpus_tables_list[0]["table"]
+                    else:
+                        strategies = list(build_config.get("strategies", {}).keys()) or ["baseline"]
+                        build_results = construct_build_results(
+                            project_name=project_name,
+                            strategies=strategies,
+                            catalog=settings.CATALOG,
+                            schema=settings.SCHEMA
+                        )
+                        eval_request.corpus_table = extract_corpus_table(build_results)
 
                 except Exception as e:
                     if isinstance(e, HTTPException):
@@ -94,14 +87,10 @@ async def create_evaluation(
         else:
             if not eval_request.queries_table:
                 raise HTTPException(status_code=400, detail="queries_table is required when auto_generate_queries is false")
-        
-        # Create evaluation record ID before submission so it can be logged in MLflow
-        eval_id = str(uuid.uuid4())
 
-        # Use the unified eval_notebook (now includes all features)
+        eval_id = str(uuid.uuid4())
         notebook_path = settings.EVAL_NOTEBOOK_PATH
 
-        # Submit the evaluation job
         job_run_id = submit_eval_job(
             w=w,
             notebook_path=notebook_path,
@@ -110,6 +99,7 @@ async def create_evaluation(
             build_parent_run_id=build_parent_run_id,
             queries_table=eval_request.queries_table,
             corpus_table=eval_request.corpus_table,
+            corpus_tables=corpus_tables_list,
             project_name=project_name,
             catalog=settings.CATALOG,
             schema=settings.SCHEMA,
@@ -283,6 +273,65 @@ async def get_evaluation_results(run_id: str, sql_connector=Depends(get_sql_conn
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to retrieve evaluation results: {str(e)}")
+
+
+@router.post("/explain")
+async def explain_strategy_comparison(request: dict):
+    """Use LLM to explain why one strategy outperformed another for a data source"""
+    try:
+        source_name = request.get("source_name", "")
+        source_type = request.get("source_type", "")
+        strategies = request.get("strategies", [])
+        judge_endpoint = request.get("judge_endpoint", "databricks-claude-sonnet-4-5")
+
+        if not strategies or len(strategies) < 2:
+            return {"explanation": "Need at least 2 strategies to compare."}
+
+        metrics_table = "\n".join([
+            f"- {s.get('strategy_name', '?')}: Recall@10={s.get('recall_at_10', 0):.3f}, "
+            f"NDCG@10={s.get('ndcg_at_10', 0):.3f}, "
+            f"Precision@10={s.get('precision_at_10', 0):.3f}, "
+            f"Latency={s.get('avg_latency_ms', 0):.0f}ms"
+            for s in strategies
+        ])
+
+        best = max(strategies, key=lambda s: s.get("recall_at_10", 0))
+        best_name = best.get("strategy_name", "unknown")
+
+        prompt = (
+            f"Compare these chunking strategies for {source_type} data source \"{source_name}\":\n\n"
+            f"{metrics_table}\n\n"
+            f"The best performing strategy is \"{best_name}\".\n\n"
+            f"In 2-3 concise sentences, explain:\n"
+            f"1. Why {best_name} performs best for this type of data\n"
+            f"2. Key trade-offs between the strategies (quality vs latency)\n"
+            f"3. A practical recommendation"
+        )
+
+        try:
+            from openai import OpenAI
+            client = OpenAI(
+                base_url=os.environ.get("DATABRICKS_HOST", "") + "/serving-endpoints",
+                api_key=os.environ.get("DATABRICKS_TOKEN", "")
+            )
+            response = client.chat.completions.create(
+                model=judge_endpoint,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=300,
+                temperature=0.3
+            )
+            explanation = response.choices[0].message.content
+        except Exception as llm_err:
+            explanation = (
+                f"{best_name} achieved the highest Recall@10 "
+                f"({best.get('recall_at_10', 0):.3f}) for the {source_type} data source "
+                f"\"{source_name}\". This suggests its chunking approach better preserves "
+                f"the semantic boundaries relevant to this content type."
+            )
+
+        return {"explanation": explanation}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/build/{build_run_id}", response_model=List[EvaluationResponse])

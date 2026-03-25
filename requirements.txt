@@ -28,3 +28,4 @@ openai>=1.0.0
 
 # Document Processing
 pymupdf>=1.23.0  # PyMuPDF for PDF text extraction
+python-docx>=1.1.0  # Word/DOCX file extraction

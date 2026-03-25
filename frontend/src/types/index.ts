@@ -6,10 +6,15 @@ export interface Project {
   updated_at: string
 }
 
-export interface BuildJobConfig {
-  data_type: string
-  data_config: Record<string, any>
+export interface SourceConfig {
+  source_name: string
+  source_type: string
+  config: Record<string, any>
   strategies: Record<string, Record<string, any>>
+}
+
+export interface BuildJobConfig {
+  sources: SourceConfig[]
   embedding_model_endpoint: string
   vs_endpoint_name: string
   create_index: boolean

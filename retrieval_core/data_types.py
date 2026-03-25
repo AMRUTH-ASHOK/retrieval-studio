@@ -449,13 +449,109 @@ class UCVolumeDataType(DataTypeHandler):
 
             return json_docs
 
+        elif file_ext in ('.docx', '.doc'):
+            docx_handler = DocxDataType()
+            import io
+            file_obj = io.BytesIO(content.encode('utf-8') if isinstance(content, str) else content)
+            file_obj.name = filename
+
+            docx_docs = docx_handler.load_documents({
+                "uploaded_files": [file_obj]
+            })
+
+            for doc in docx_docs:
+                doc.metadata["source_type"] = "uc_volume"
+                doc.metadata["file_path"] = file_path
+                doc.data_type = "uc_volume"
+
+            return docx_docs
+
         else:
-            # Unsupported file type - log warning and skip
             print(f"[WARNING] Unsupported file type: {file_ext} for file {file_path}")
             return []
     
     def get_compatible_strategies(self) -> List[str]:
-        return ["baseline", "structured", "parent_child"]
+        return ["baseline", "structured", "parent_child", "semantic"]
+
+
+class DocxDataType(DataTypeHandler):
+    """Word/DOCX document handler"""
+
+    def get_name(self) -> str:
+        return "docx"
+
+    def get_display_name(self) -> str:
+        return "Word Documents"
+
+    def get_input_schema(self) -> Dict:
+        return {
+            "source_type": "upload",
+            "file_types": ["docx"],
+            "multiple": True,
+            "fields": []
+        }
+
+    def load_documents(self, config: Dict[str, Any]) -> List[Document]:
+        """Load Word/DOCX documents using python-docx"""
+        documents = []
+        uploaded_files = config.get("uploaded_files", [])
+
+        for file in uploaded_files:
+            filename = getattr(file, 'name', 'unknown.docx')
+            text = self._extract_text_from_docx(file)
+
+            doc = Document(
+                doc_id=str(uuid.uuid4()),
+                doc_name=filename,
+                text=text,
+                metadata={
+                    "source_type": "docx",
+                    "filename": filename,
+                    "file_size": getattr(file, 'size', 0)
+                },
+                data_type="docx"
+            )
+            documents.append(doc)
+
+        return documents
+
+    def _extract_text_from_docx(self, file) -> str:
+        """Extract text from DOCX file preserving paragraphs, headings, and table content"""
+        try:
+            from docx import Document as DocxDocument
+            import io
+
+            content = file.read() if hasattr(file, 'read') else file
+            if isinstance(content, str):
+                content = content.encode('utf-8')
+
+            doc = DocxDocument(io.BytesIO(content))
+
+            text_parts = []
+
+            for paragraph in doc.paragraphs:
+                if paragraph.text.strip():
+                    if paragraph.style and paragraph.style.name.startswith('Heading'):
+                        text_parts.append(f"\n{'#' * int(paragraph.style.name[-1]) if paragraph.style.name[-1].isdigit() else '##'} {paragraph.text}\n")
+                    else:
+                        text_parts.append(paragraph.text)
+
+            for table in doc.tables:
+                table_rows = []
+                for row in table.rows:
+                    cells = [cell.text.strip() for cell in row.cells]
+                    table_rows.append(" | ".join(cells))
+                if table_rows:
+                    text_parts.append("\n" + "\n".join(table_rows) + "\n")
+
+            return "\n\n".join(text_parts) if text_parts else f"[No text found in {getattr(file, 'name', 'file')}]"
+
+        except Exception as e:
+            filename = getattr(file, 'name', 'file')
+            return f"[Error extracting DOCX content from {filename}: {str(e)}]"
+
+    def get_compatible_strategies(self) -> List[str]:
+        return ["baseline", "structured", "parent_child", "semantic"]
 
 
 class TextDataType(DataTypeHandler):
@@ -667,6 +763,7 @@ class JSONDataType(DataTypeHandler):
 # Registry of all available data types
 DATA_TYPE_REGISTRY = {
     "pdf": PDFDataType(),
+    "docx": DocxDataType(),
     "delta_table": DeltaTableDataType(),
     "uc_volume": UCVolumeDataType(),
     "text": TextDataType(),

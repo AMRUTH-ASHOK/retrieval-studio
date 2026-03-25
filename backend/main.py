@@ -14,7 +14,7 @@ import uuid
 # Add project paths
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from backend.api import projects, builds, evaluations, leaderboard, metadata, uploads
+from backend.api import projects, builds, evaluations, leaderboard, metadata, uploads, cleanup, studies
 from backend.auth import get_workspace_client, get_vector_search_client, get_sql_connector as get_app_sql_connector
 from backend.config import settings
 
@@ -190,48 +190,42 @@ async def create_evaluation_no_trailing_slash(
         generate_golden = eval_request.generate_golden_dataset or False
 
         # Validate required parameters based on mode
+        corpus_tables_list = None
+
         if use_golden:
             if not eval_request.golden_dataset_table:
                 raise HTTPException(status_code=400, detail="golden_dataset_table is required when use_golden_dataset is true")
         elif auto_generate:
-            # Construct corpus_table name using the same logic as build notebook
-            # No need to query Databricks API or PostgreSQL - just pure computation
             try:
-                from backend.utils.build_results import construct_build_results, extract_corpus_table
+                from backend.utils.build_results import construct_build_results, extract_corpus_tables, extract_corpus_table
 
-                # Get build config to determine which strategies were enabled
                 build_config = build_run.get("config", {})
                 project_name = build_run.get("project_name")
 
                 if not project_name:
                     raise HTTPException(status_code=400, detail="Project name not found in build record.")
 
-                # Extract enabled strategies from config
-                strategies = []
-                if build_config.get("baseline_enabled"):
-                    strategies.append("baseline")
-                if build_config.get("semantic_enabled"):
-                    strategies.append("semantic")
-                if build_config.get("structured_enabled"):
-                    strategies.append("structured")
-
-                if not strategies:
-                    # Default to baseline if no strategies specified
-                    strategies = ["baseline"]
-
-                # Construct results using same logic as notebook (deterministic)
-                build_results = construct_build_results(
-                    project_name=project_name,
-                    strategies=strategies,
-                    catalog=settings.CATALOG,
-                    schema=settings.SCHEMA
-                )
-
-                # Extract corpus_table (prefer baseline, then semantic, then structured)
-                corpus_table = extract_corpus_table(build_results)
-
-                # Set the auto-constructed corpus_table
-                eval_request.corpus_table = corpus_table
+                build_sources = build_config.get("sources", [])
+                if build_sources:
+                    build_results = construct_build_results(
+                        project_name=project_name,
+                        strategies=[],
+                        catalog=settings.CATALOG,
+                        schema=settings.SCHEMA,
+                        sources=build_sources
+                    )
+                    corpus_tables_list = extract_corpus_tables(build_results)
+                    if corpus_tables_list:
+                        eval_request.corpus_table = corpus_tables_list[0]["table"]
+                else:
+                    strategies = list(build_config.get("strategies", {}).keys()) or ["baseline"]
+                    build_results = construct_build_results(
+                        project_name=project_name,
+                        strategies=strategies,
+                        catalog=settings.CATALOG,
+                        schema=settings.SCHEMA
+                    )
+                    eval_request.corpus_table = extract_corpus_table(build_results)
 
             except Exception as e:
                 if isinstance(e, HTTPException):
@@ -244,10 +238,8 @@ async def create_evaluation_no_trailing_slash(
         build_parent_run_id = build_run.get("build_parent_run_id")
         eval_id = str(uuid.uuid4())
 
-        # Use the unified eval_notebook (now includes all features)
         notebook_path = settings.EVAL_NOTEBOOK_PATH
 
-        # Submit the evaluation job
         job_run_id = submit_eval_job(
             w=w,
             notebook_path=notebook_path,
@@ -256,6 +248,7 @@ async def create_evaluation_no_trailing_slash(
             build_parent_run_id=build_parent_run_id,
             queries_table=eval_request.queries_table,
             corpus_table=eval_request.corpus_table,
+            corpus_tables=corpus_tables_list,
             project_name=project_name,
             catalog=settings.CATALOG,
             schema=settings.SCHEMA,
@@ -328,6 +321,8 @@ app.include_router(evaluations.router, prefix="/api/evaluations", tags=["evaluat
 app.include_router(leaderboard.router, prefix="/api/leaderboard", tags=["leaderboard"])
 app.include_router(metadata.router, prefix="/api/metadata", tags=["metadata"])
 app.include_router(uploads.router, prefix="/api/uploads", tags=["uploads"])
+app.include_router(cleanup.router, prefix="/api/cleanup", tags=["cleanup"])
+app.include_router(studies.router, prefix="/api/studies", tags=["studies"])
 
 # Serve static files from React build
 FRONTEND_BUILD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist")
