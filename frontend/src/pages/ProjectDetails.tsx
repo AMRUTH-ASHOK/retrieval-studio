@@ -89,9 +89,28 @@ export default function ProjectDetails() {
       const response = await api.post(`/cleanup/projects/${projectId}/cleanup`)
       setCleanupResult(response.data)
       setShowCleanupModal(false)
-      loadIndexSelections()
-    } catch (e) { console.error('Cleanup failed:', e) }
-    setIsCleaningUp(false)
+
+      if (response.data.job_run_id) {
+        const pollCleanup = setInterval(async () => {
+          try {
+            const statusResp = await api.get(`/builds/${response.data.job_run_id}/status`)
+            const state = statusResp.data?.state
+            if (state === 'SUCCESS' || state === 'FAILED') {
+              clearInterval(pollCleanup)
+              setIsCleaningUp(false)
+              setCleanupResult((prev: any) => ({ ...prev, state, completed: true }))
+              loadIndexSelections()
+            }
+          } catch { /* keep polling */ }
+        }, 5000)
+      } else {
+        setIsCleaningUp(false)
+        loadIndexSelections()
+      }
+    } catch (e) {
+      console.error('Cleanup failed:', e)
+      setIsCleaningUp(false)
+    }
   }
 
   const handleCreateStudy = async () => {
@@ -558,11 +577,17 @@ export default function ProjectDetails() {
             </div>
 
             {cleanupResult && (
-              <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-md">
-                <p className="text-sm text-green-800">
-                  Cleanup job submitted. {cleanupResult.count} resources queued for deletion.
+              <div className={`mb-4 p-3 rounded-md border ${cleanupResult.completed && cleanupResult.state === 'SUCCESS' ? 'bg-green-50 border-green-200' : cleanupResult.completed && cleanupResult.state === 'FAILED' ? 'bg-red-50 border-red-200' : 'bg-blue-50 border-blue-200'}`}>
+                <p className={`text-sm ${cleanupResult.completed && cleanupResult.state === 'SUCCESS' ? 'text-green-800' : cleanupResult.completed && cleanupResult.state === 'FAILED' ? 'text-red-800' : 'text-blue-800'}`}>
+                  {cleanupResult.completed && cleanupResult.state === 'SUCCESS'
+                    ? `Cleanup complete! ${cleanupResult.count} resources deleted.`
+                    : cleanupResult.completed && cleanupResult.state === 'FAILED'
+                    ? 'Cleanup job failed. Check the Databricks job for details.'
+                    : isCleaningUp
+                    ? `Cleanup running... ${cleanupResult.count} resources queued for deletion.`
+                    : `Cleanup job submitted. ${cleanupResult.count} resources queued.`}
                   {cleanupResult.job_url && (
-                    <a href={cleanupResult.job_url} target="_blank" rel="noopener noreferrer" className="ml-2 text-green-700 underline">View job</a>
+                    <a href={cleanupResult.job_url} target="_blank" rel="noopener noreferrer" className="ml-2 underline">View job</a>
                   )}
                 </p>
               </div>

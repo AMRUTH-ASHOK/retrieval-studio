@@ -497,21 +497,24 @@ with start_eval_parent_run(run_name=f"eval_{build_run_id[:8]}", parent_run_id=bu
     for _, r in build_child_runs.iterrows():
         build_child_run_id = r.run_id
         strategy_name = r.get("params.strategy_name")
+        source_name = r.get("params.source_name") or ""
+        source_type = r.get("params.source_type") or ""
         index_name = r.get("params.vs_index_name")
         vs_endpoint = r.get("params.vs_endpoint")
 
         if not (strategy_name and index_name and vs_endpoint):
             continue
 
+        display_label = f"{source_name}/{strategy_name}" if source_name else strategy_name
         print(f"\n{'='*60}")
-        print(f"Evaluating strategy: {strategy_name}")
+        print(f"Evaluating: {display_label}")
         print(f"{'='*60}")
 
-        # Test each query type
         for query_type in query_types:
             print(f"\n--- Testing {query_type} ---")
 
-            with mlflow.start_run(run_name=f"eval_{strategy_name}_{query_type}", nested=True) as eval_child:
+            run_label = f"eval_{source_name}_{strategy_name}_{query_type}" if source_name else f"eval_{strategy_name}_{query_type}"
+            with mlflow.start_run(run_name=run_label, nested=True) as eval_child:
                 mlflow.set_tag("rs_role", "eval_strategy")
                 mlflow.log_param("build_run_id", build_run_id)
                 if build_parent_run_id:
@@ -519,11 +522,14 @@ with start_eval_parent_run(run_name=f"eval_{build_run_id[:8]}", parent_run_id=bu
                 mlflow.log_param("eval_id", eval_id)
                 mlflow.set_tag("rs_eval_id", eval_id)
                 mlflow.log_param("build_child_run_id", build_child_run_id)
+                mlflow.log_param("source_name", source_name)
+                mlflow.log_param("source_type", source_type)
                 mlflow.log_param("strategy_name", strategy_name)
                 mlflow.log_param("query_type", query_type)
                 mlflow.log_param("vs_endpoint", vs_endpoint)
                 mlflow.log_param("vs_index_name", index_name)
                 mlflow.set_tag("strategy", strategy_name)
+                mlflow.set_tag("source", source_name)
                 mlflow.set_tag("query_type", query_type)
 
                 recalls_by_k = {k: [] for k in metric_k_values}

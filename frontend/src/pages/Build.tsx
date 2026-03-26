@@ -144,6 +144,52 @@ export default function Build() {
 
   const totalCombos = useMemo(() => dataSources.reduce((acc, s) => acc + s.strategies.length, 0), [dataSources])
 
+  const canProceedFromStep = (step: number): boolean => {
+    if (step === 0) {
+      const configured = dataSources.filter(s => s.name && s.dataType)
+      return configured.length > 0
+    }
+    if (step === 1) {
+      return totalCombos > 0
+    }
+    if (step === 2) {
+      return embeddingEndpoint.trim() !== '' && vsEndpoint.trim() !== ''
+    }
+    return true
+  }
+
+  const getStepError = (step: number): string => {
+    if (step === 0) {
+      const configured = dataSources.filter(s => s.name && s.dataType)
+      if (configured.length === 0) return 'Add at least one source with a name and data type'
+      const noName = dataSources.filter(s => s.dataType && !s.name)
+      if (noName.length > 0) return 'All sources must have a name'
+      return ''
+    }
+    if (step === 1) {
+      if (totalCombos === 0) return 'Select at least one strategy for at least one source'
+      const sourcesWithoutStrategies = dataSources.filter(s => s.name && s.dataType && s.strategies.length === 0)
+      if (sourcesWithoutStrategies.length > 0) return `Warning: ${sourcesWithoutStrategies.map(s => `"${s.name}"`).join(', ')} will be skipped (no strategies selected)`
+      return ''
+    }
+    if (step === 2) {
+      if (!embeddingEndpoint.trim()) return 'Embedding model endpoint is required'
+      if (!vsEndpoint.trim()) return 'Vector search endpoint is required'
+      return ''
+    }
+    return ''
+  }
+
+  const handleNext = () => {
+    const stepError = getStepError(activeStep)
+    if (stepError && !canProceedFromStep(activeStep)) {
+      setError(stepError)
+      return
+    }
+    setError(stepError.startsWith('Warning:') ? stepError : '')
+    setActiveStep(prev => Math.min(prev + 1, steps.length - 1))
+  }
+
   const handleSubmit = async () => {
     if (!selectedProjectId) { setError('Please select a project first'); return }
 
@@ -183,16 +229,13 @@ export default function Build() {
 
       const result = await buildsApi.create({ project_id: selectedProjectId, config })
       setSubmittedRunId(result.run_id)
+      setIsSubmitting(false)
       try {
         const status = await buildsApi.getStatus(result.run_id)
         setJobStatus({ state: status.state, job_url: status.job_url, start_time: status.start_time, status: status.status, run_id: status.run_id })
       } catch {
         setJobStatus({ state: result.state, job_url: result.job_url || null, start_time: new Date(result.created_at).getTime(), status: null, run_id: result.run_id })
       }
-      setActiveStep(0)
-      setDataSources([{ id: crypto.randomUUID(), name: '', dataType: '', config: {}, strategies: [], files: [], uploadedVolumePath: null }])
-      setEmbeddingEndpoint('')
-      setVsEndpoint('')
     } catch (e) {
       console.error('Failed to submit build job:', e)
       setError('Failed to submit build job')
@@ -358,6 +401,11 @@ export default function Build() {
                   {compatible.length === 0 && (
                     <p className="text-sm text-yellow-800 bg-yellow-50 p-3 rounded-md">No compatible strategies for this data type.</p>
                   )}
+                  {compatible.length > 0 && source.strategies.length === 0 && (
+                    <div className="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded-md">
+                      <p className="text-xs text-yellow-800"><AlertCircle className="w-3.5 h-3.5 inline mr-1" />No strategies selected. This source will be skipped during build.</p>
+                    </div>
+                  )}
                 </Card>
               )
             })}
@@ -406,24 +454,25 @@ export default function Build() {
                   <tr className="border-b border-databricks-gray-200">
                     <th className="text-left py-2 px-3 text-databricks-gray-700">Source</th>
                     <th className="text-left py-2 px-3 text-databricks-gray-700">Type</th>
-                    <th className="text-left py-2 px-3 text-databricks-gray-700">Strategies</th>
-                    <th className="text-center py-2 px-3 text-databricks-gray-700">Tables/Indexes</th>
+                    <th className="text-left py-2 px-3 text-databricks-gray-700">Strategy</th>
+                    <th className="text-left py-2 px-3 text-databricks-gray-700">Table Name</th>
                   </tr>
                 </thead>
                 <tbody>
                   {validSources.map(source => {
                     const dtInfo = dataTypes.find(d => d.name === source.dataType)
                     return (
-                      <tr key={source.id} className="border-b border-databricks-gray-100">
-                        <td className="py-2 px-3 font-medium text-databricks-gray-900">{source.name}</td>
-                        <td className="py-2 px-3"><Badge variant="secondary">{dtInfo?.display_name || source.dataType}</Badge></td>
-                        <td className="py-2 px-3">
-                          <div className="flex flex-wrap gap-1">
-                            {source.strategies.map(s => <Badge key={s} variant="info">{s}</Badge>)}
-                          </div>
-                        </td>
-                        <td className="py-2 px-3 text-center font-semibold">{source.strategies.length}</td>
-                      </tr>
+                      {source.strategies.map(strat => {
+                        const tableName = `rs_chunks_${selectedProject?.project_name?.toLowerCase().replace(/[^a-z0-9_-]/g, '_') || 'project'}_${source.name.toLowerCase()}_${strat}`
+                        return (
+                          <tr key={`${source.id}-${strat}`} className="border-b border-databricks-gray-100">
+                            <td className="py-2 px-3 font-medium text-databricks-gray-900">{source.name}</td>
+                            <td className="py-2 px-3"><Badge variant="secondary">{dtInfo?.display_name || source.dataType}</Badge></td>
+                            <td className="py-2 px-3"><Badge variant="info">{strat}</Badge></td>
+                            <td className="py-2 px-3 font-mono text-xs text-databricks-gray-500 truncate max-w-[280px]" title={tableName}>{tableName}</td>
+                          </tr>
+                        )
+                      })}
                     )
                   })}
                 </tbody>
@@ -468,6 +517,20 @@ export default function Build() {
             </div>
           )}
 
+          {submittedRunId && jobStatus ? (
+            <Card className="mb-6">
+              <div className="text-center py-6">
+                <CheckCircle2 className="w-12 h-12 mx-auto mb-3 text-databricks-blue" />
+                <h3 className="text-lg font-medium text-databricks-gray-900 mb-2">Build Job Submitted</h3>
+                <p className="text-sm text-databricks-gray-600">Your build is running. Monitor progress below.</p>
+                <Button variant="outline" className="mt-4" onClick={() => {
+                  setSubmittedRunId(null); setJobStatus(null)
+                  setDataSources([{ id: crypto.randomUUID(), name: '', dataType: '', config: {}, strategies: [], files: [], uploadedVolumePath: null }])
+                  setEmbeddingEndpoint(''); setVsEndpoint(''); setActiveStep(0)
+                }}>Start New Build</Button>
+              </div>
+            </Card>
+          ) : (
           <Card>
             <div className="mb-8">
               <div className="flex items-center justify-between">
@@ -492,17 +555,18 @@ export default function Build() {
             )}
 
             <div className="flex justify-between items-center pt-6 border-t border-databricks-gray-200">
-              <Button variant="outline" onClick={() => setActiveStep(prev => Math.max(prev - 1, 0))} disabled={activeStep === 0} icon={<ChevronLeft className="w-4 h-4" />}>Back</Button>
+              <Button variant="outline" onClick={() => { setActiveStep(prev => Math.max(prev - 1, 0)); setError('') }} disabled={activeStep === 0} icon={<ChevronLeft className="w-4 h-4" />}>Back</Button>
               <div className="flex gap-3">
                 {activeStep === steps.length - 1 ? (
                   <Button variant="primary" onClick={handleSubmit} isLoading={isSubmitting} disabled={!selectedProjectId || isSubmitting || totalCombos === 0}
                     icon={<PlayCircle className="w-4 h-4" />}>Submit Build Job</Button>
                 ) : (
-                  <Button variant="primary" onClick={() => setActiveStep(prev => Math.min(prev + 1, steps.length - 1))} icon={<ChevronRight className="w-4 h-4" />}>Next</Button>
+                  <Button variant="primary" onClick={handleNext} disabled={!canProceedFromStep(activeStep)} icon={<ChevronRight className="w-4 h-4" />}>Next</Button>
                 )}
               </div>
             </div>
           </Card>
+          )}
 
           {jobStatus && submittedRunId && (
             <Card className="mt-6">

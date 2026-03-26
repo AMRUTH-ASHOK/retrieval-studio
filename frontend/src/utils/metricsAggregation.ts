@@ -45,6 +45,7 @@ export type EvaluationMetrics = {
   eval_name: string
   build_run_id: string
   strategy: string
+  source_name: string
   query_type: string
   metrics: AggregatedMetrics
 }
@@ -167,11 +168,14 @@ export function aggregateByEvaluation(mlflowRuns: MLflowRun[]): EvaluationMetric
     if (!run) {
       return null as any
     }
+    const sourceName = run.params?.source_name || run.tags?.source || ''
+    const strategyName = run.tags?.strategy || run.params?.strategy_name || run.params?.strategy || 'unknown'
     return {
       eval_run_id: run.run_id || 'unknown',
       eval_name: run.run_name || 'Unnamed Run',
       build_run_id: run.params?.build_run_id || run.tags?.build_run_id || 'unknown',
-      strategy: run.tags?.strategy || run.params?.strategy_name || run.params?.strategy || 'unknown',
+      strategy: sourceName ? `${sourceName} / ${strategyName}` : strategyName,
+      source_name: sourceName,
       query_type: run.tags?.query_type || run.params?.query_type || 'unknown',
       metrics: (run.metrics || {}) as AggregatedMetrics
     }

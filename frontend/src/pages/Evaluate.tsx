@@ -422,7 +422,7 @@ export default function Evaluate() {
             {/* Configuration Section */}
             <div className="border-t-4 border-databricks-blue pt-6">
               <h3 className="text-md font-semibold text-databricks-gray-900 mb-4">
-                {evaluationMode === 'existing' ? '📄 Golden Dataset' : '🤖 Auto-Generate & Golden Dataset'}
+                {evaluationMode === 'existing' ? 'Golden Dataset (Read From)' : evaluationMode === 'auto-generate' ? 'Auto-Generate (Write To)' : 'Upload & Store'}
               </h3>
 
               {evaluationMode === 'existing' ? (
@@ -438,11 +438,11 @@ export default function Evaluate() {
               ) : evaluationMode === 'auto-generate' ? (
                 <div className="space-y-4 p-5 bg-green-50 border border-green-200 rounded-lg">
                   <Input
-                    label="Golden Dataset Table (Delta)"
+                    label="Output Table for Generated Golden Dataset"
                     value={goldenDatasetTable}
                     onChange={(e) => setGoldenDatasetTable(e.target.value)}
                     placeholder="catalog.schema.rs_golden_project"
-                    helperText="Where generated queries + labels will be stored. Corpus tables are auto-detected from your build's sources."
+                    helperText="The system will generate queries from your build's chunk tables and WRITE the golden dataset to this Delta table."
                   />
                 </div>
               ) : (
