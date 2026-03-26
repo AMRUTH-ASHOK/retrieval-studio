@@ -124,6 +124,26 @@ def _load_single_source(src_type, src_config):
 
     if volume_path:
         print(f"[INFO] Loading {src_type} documents from UC Volume: {volume_path}")
+
+        # Diagnostic: verify path is accessible
+        try:
+            from databricks.sdk.runtime import dbutils
+            file_pattern = src_config.get("file_pattern", "*.*")
+            all_items = dbutils.fs.ls(volume_path)
+            print(f"[DEBUG] dbutils.fs.ls('{volume_path}') returned {len(all_items)} items:")
+            for item in all_items[:20]:
+                print(f"  {'[DIR]' if item.isDir() else '[FILE]'} {item.name} ({item.size} bytes) path={item.path}")
+            if len(all_items) > 20:
+                print(f"  ... and {len(all_items) - 20} more items")
+
+            import fnmatch
+            matched = [f for f in all_items if not f.isDir() and fnmatch.fnmatch(f.name, file_pattern)]
+            print(f"[DEBUG] Files matching pattern '{file_pattern}': {len(matched)}")
+            if not matched:
+                print(f"[WARNING] No files matched pattern '{file_pattern}'. Available file names: {[f.name for f in all_items if not f.isDir()][:20]}")
+        except Exception as diag_err:
+            print(f"[ERROR] Failed to list volume path '{volume_path}': {diag_err}")
+
         uc_volume_handler = get_data_type_handler("uc_volume")
         volume_config = {
             "volume_path": volume_path,
@@ -194,10 +214,13 @@ USING DELTA
 """)
 
 # Add source_name column if missing (backward compat)
-try:
-    spark.sql(f"ALTER TABLE {index_registry} ADD COLUMNS (source_name STRING)")
-except Exception:
-    pass
+existing_cols = [c.name.lower() for c in spark.table(index_registry).schema]
+if "source_name" not in existing_cols:
+    try:
+        spark.sql(f"ALTER TABLE {index_registry} ADD COLUMNS (source_name STRING)")
+        print("[INFO] Added source_name column to index registry")
+    except Exception as e:
+        print(f"[WARNING] ALTER TABLE for source_name skipped: {e}")
 
 # COMMAND ----------
 import mlflow
@@ -252,11 +275,19 @@ with mlflow.start_run(run_name=f"build_{run_id[:8]}") as parent_run:
     except Exception as e:
         print(f"[WARNING] Failed to store build_parent_run_id for run_id={run_id}: {e}")
 
-    for source in sources:
-        source_name = source["source_name"]
-        source_type = source["source_type"]
-        source_config = source["config"]
+    for source_idx, source in enumerate(sources):
+        source_name = source.get("source_name")
+        source_type = source.get("source_type")
+        source_config = source.get("config", {})
         source_strategies = source.get("strategies", {})
+
+        if not source_name or not source_type:
+            print(f"[WARNING] Skipping source {source_idx}: missing source_name or source_type")
+            continue
+
+        if not isinstance(source_strategies, dict) or not source_strategies:
+            print(f"[WARNING] Skipping source '{source_name}': no strategies defined")
+            continue
 
         print(f"\n{'='*60}")
         print(f"Source: {source_name} (type={source_type})")
@@ -373,11 +404,14 @@ with mlflow.start_run(run_name=f"build_{run_id[:8]}") as parent_run:
                         if wait_ready:
                             wait_for_index(vs_client, vs_endpoint_name, idx_name)
 
-                    # Update registry
-                    spark.sql(f"DELETE FROM {index_registry} WHERE project = '{project_name}' AND source_name = '{source_name}' AND strategy = '{strategy_name}'")
+                    # Update registry (use parameterized queries via DataFrame API)
+                    def _esc(val):
+                        return str(val).replace("'", "''") if val else ""
+
+                    spark.sql(f"DELETE FROM {index_registry} WHERE project = '{_esc(project_name)}' AND source_name = '{_esc(source_name)}' AND strategy = '{_esc(strategy_name)}'")
                     spark.sql(f"""
                       INSERT INTO {index_registry}
-                      VALUES ('{project_name}', '{source_name}', '{strategy_name}', '{vs_endpoint_name}', '{idx_name}', '{source_for_index}', '{embedding_model_endpoint}', current_timestamp())
+                      VALUES ('{_esc(project_name)}', '{_esc(source_name)}', '{_esc(strategy_name)}', '{_esc(vs_endpoint_name)}', '{_esc(idx_name)}', '{_esc(source_for_index)}', '{_esc(embedding_model_endpoint)}', current_timestamp())
                     """)
 
                     mlflow.log_param("chunks_table", chunks_table)
@@ -423,5 +457,10 @@ with mlflow.start_run(run_name=f"build_{run_id[:8]}") as parent_run:
                         "mlflow_run_id": child_run.info.run_id,
                     }
 
-final_state = "SUCCESS" if all(v.get("status") != "FAILED" for v in strategy_results.values()) else "PARTIAL_SUCCESS"
+if not strategy_results:
+    final_state = "FAILED"
+elif all(v.get("status") != "FAILED" for v in strategy_results.values()):
+    final_state = "SUCCESS"
+else:
+    final_state = "PARTIAL_SUCCESS"
 dbutils.notebook.exit(json.dumps({"run_id": run_id, "status": final_state, "results": strategy_results}))

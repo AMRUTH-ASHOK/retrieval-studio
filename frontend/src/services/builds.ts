@@ -44,4 +44,9 @@ export const buildsApi = {
     const response = await api.get(`/builds/${runId}/results`)
     return response.data
   },
+
+  delete: async (runId: string): Promise<{ success: boolean; message: string }> => {
+    const response = await api.delete(`/builds/${runId}`)
+    return response.data
+  },
 }

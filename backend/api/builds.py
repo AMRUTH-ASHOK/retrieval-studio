@@ -12,12 +12,13 @@ from backend.config import settings
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from utils.jobs import submit_build_job, get_job_run_status, get_job_url
+from utils.jobs import submit_build_job, get_job_run_status, get_job_url, get_job_run_output
 from utils.postgres_state import get_build as get_run, get_builds_by_project as get_project_runs
 
 router = APIRouter()
 
 
+@router.post("", response_model=BuildJobResponse, include_in_schema=False)
 @router.post("/", response_model=BuildJobResponse)
 async def create_build_job(
     build_request: BuildJobCreate,
@@ -251,6 +252,21 @@ async def get_build_results(run_id: str, w=Depends(get_workspace_client), sql_co
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.delete("/{run_id}")
+async def delete_build_job(run_id: str, sql_connector=Depends(get_sql_connector)):
+    """Delete a build and all its associated evaluations"""
+    try:
+        from utils.postgres_state import delete_build
+        success = delete_build(run_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Build not found")
+        return {"success": True, "message": f"Build {run_id} and its evaluations deleted"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/{run_id}/status")
 async def get_build_job_status(run_id: str, w=Depends(get_workspace_client), sql_connector=Depends(get_sql_connector)):
     """Get build job status with job URL
@@ -292,12 +308,50 @@ async def get_build_job_status(run_id: str, w=Depends(get_workspace_client), sql
             "PENDING": "PENDING",
         }
         mapped_state = state_mapping.get(new_state, current_state)
+
+        # When Databricks says SUCCESS, check the notebook's exit value
+        # for the actual build status (PARTIAL_SUCCESS, FAILED, etc.)
+        notebook_output = None
+        error_message = None
+        if mapped_state == "SUCCESS":
+            try:
+                output = get_job_run_output(w, job_run_id)
+                notebook_output = output.get("results")
+                if isinstance(notebook_output, dict):
+                    nb_status = notebook_output.get("status", "SUCCESS")
+                    if nb_status == "FAILED":
+                        mapped_state = "FAILED"
+                        failed_items = {
+                            k: v.get("error", "unknown error")
+                            for k, v in notebook_output.get("results", {}).items()
+                            if isinstance(v, dict) and v.get("status") == "FAILED"
+                        }
+                        error_message = f"All sources/strategies failed: {failed_items}" if failed_items else "Build failed"
+                    elif nb_status == "PARTIAL_SUCCESS":
+                        failed_items = {
+                            k: v.get("error", "unknown error")
+                            for k, v in notebook_output.get("results", {}).items()
+                            if isinstance(v, dict) and v.get("status") == "FAILED"
+                        }
+                        if failed_items:
+                            total = len(notebook_output.get("results", {}))
+                            if len(failed_items) == total:
+                                mapped_state = "FAILED"
+                                error_message = f"All {total} source-strategy combos failed: {failed_items}"
+                            else:
+                                mapped_state = "PARTIAL_SUCCESS"
+                                error_message = f"{len(failed_items)}/{total} failed: {failed_items}"
+                        else:
+                            mapped_state = "PARTIAL_SUCCESS"
+            except Exception as e:
+                print(f"[WARNING] Failed to inspect notebook output: {e}")
         
         if mapped_state != current_state:
             from utils.postgres_state import update_build_state as update_run_state
             update_run_state(
                 run_id=run_id,
-                state=mapped_state
+                state=mapped_state,
+                error_message=error_message
             )
         
         return {
@@ -306,6 +360,8 @@ async def get_build_job_status(run_id: str, w=Depends(get_workspace_client), sql
             "job_url": job_url,
             "status": job_status,
             "start_time": job_status.get("start_time"),
+            "error_message": error_message,
+            "notebook_output": notebook_output,
         }
     except HTTPException:
         raise

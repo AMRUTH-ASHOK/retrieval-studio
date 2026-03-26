@@ -71,11 +71,7 @@ export const uploadsApi = {
       formData.append('upload_id', uploadId)
     }
     
-    const response = await api.post('/api/uploads/files', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data'
-      }
-    })
+    const response = await api.post('/uploads/files', formData)
     
     return response.data
   },
@@ -84,7 +80,7 @@ export const uploadsApi = {
    * List files for a specific upload
    */
   async listFiles(uploadId: string, projectName: string): Promise<ListFilesResponse> {
-    const response = await api.get(`/api/uploads/files/${uploadId}`, {
+    const response = await api.get(`/uploads/files/${uploadId}`, {
       params: { project_name: projectName }
     })
     return response.data
@@ -94,7 +90,7 @@ export const uploadsApi = {
    * Delete uploaded files for a specific upload ID
    */
   async deleteFiles(uploadId: string, projectName: string): Promise<{ deleted: boolean }> {
-    const response = await api.delete(`/api/uploads/files/${uploadId}`, {
+    const response = await api.delete(`/uploads/files/${uploadId}`, {
       params: { project_name: projectName }
     })
     return response.data
@@ -104,7 +100,7 @@ export const uploadsApi = {
    * Get information about the configured data volume
    */
   async getVolumeInfo(): Promise<VolumeInfo> {
-    const response = await api.get('/api/uploads/volume-info')
+    const response = await api.get('/uploads/volume-info')
     return response.data
   },
 
@@ -112,7 +108,7 @@ export const uploadsApi = {
    * Ensure the data volume exists (creates if necessary)
    */
   async ensureVolume(): Promise<VolumeInfo & { success: boolean }> {
-    const response = await api.post('/api/uploads/volume/ensure')
+    const response = await api.post('/uploads/volume/ensure')
     return response.data
   }
 }

@@ -18,6 +18,7 @@ from typing import List, Optional, BinaryIO, Union
 from dataclasses import dataclass
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.files import DirectoryEntry
+from databricks.sdk.service.catalog import VolumeType
 import io
 
 
@@ -61,7 +62,7 @@ def ensure_volume_exists(
                     catalog_name=catalog,
                     schema_name=schema,
                     name=volume_name,
-                    volume_type="MANAGED"
+                    volume_type=VolumeType.MANAGED
                 )
                 print(f"[INFO] Created UC Volume: {full_name}")
                 return True

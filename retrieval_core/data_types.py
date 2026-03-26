@@ -302,10 +302,12 @@ class UCVolumeDataType(DataTypeHandler):
             else:
                 try:
                     all_files = dbutils.fs.ls(volume_path)
+                    print(f"[DEBUG UCVolume] Listed {len(all_files)} items in '{volume_path}'")
                     files_to_process = [
                         f.path for f in all_files
                         if not f.isDir() and fnmatch.fnmatch(f.name, file_pattern)
                     ]
+                    print(f"[DEBUG UCVolume] {len(files_to_process)} files match pattern '{file_pattern}'")
                 except Exception as e:
                     raise ValueError(f"Failed to list files in volume path '{volume_path}': {str(e)}")
 
@@ -314,15 +316,18 @@ class UCVolumeDataType(DataTypeHandler):
                 try:
                     docs = self._load_file_from_volume(dbutils, file_path, config)
                     if docs:
-                        # docs can be a single document or a list
                         if isinstance(docs, list):
                             documents.extend(docs)
                         else:
                             documents.append(docs)
+                        print(f"[DEBUG UCVolume] Loaded {len(docs) if isinstance(docs, list) else 1} doc(s) from {file_path}")
+                    else:
+                        print(f"[WARNING UCVolume] _load_file_from_volume returned empty for {file_path}")
                 except Exception as e:
                     print(f"[WARNING] Failed to load file {file_path}: {str(e)}")
                     continue
 
+            print(f"[INFO UCVolume] Total documents loaded: {len(documents)}")
             return documents
 
         except ImportError:

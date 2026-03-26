@@ -17,6 +17,7 @@ from utils.postgres_state import get_build as get_run
 router = APIRouter()
 
 
+@router.post("", response_model=EvaluationResponse, include_in_schema=False)
 @router.post("/", response_model=EvaluationResponse)
 async def create_evaluation(
     eval_request: EvaluationCreate,
@@ -163,6 +164,21 @@ async def create_evaluation(
             "updated_at": evaluation.get("updated_at") if evaluation.get("updated_at") else datetime.datetime.now(datetime.timezone.utc).isoformat()
         }
         
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/{eval_id}")
+async def delete_evaluation_by_id(eval_id: str, sql_connector=Depends(get_sql_connector)):
+    """Delete an evaluation"""
+    try:
+        from utils.postgres_state import delete_evaluation
+        success = delete_evaluation(eval_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Evaluation not found")
+        return {"success": True, "message": f"Evaluation {eval_id} deleted"}
     except HTTPException:
         raise
     except Exception as e:

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { PlayCircle, ExternalLink, Clock, Upload, File, X } from 'lucide-react'
 import { evaluationsApi } from '../services/evaluations'
 import { buildsApi } from '../services/builds'
@@ -16,6 +16,7 @@ const DEFAULT_QUERY_STYLE = 'keyword'
 
 export default function Evaluate() {
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const { selectedProject, selectedProjectId } = useProject()
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
   const [topK, setTopK] = useState(10)
@@ -39,32 +40,24 @@ export default function Evaluate() {
 
   useEffect(() => {
     if (selectedProjectId) {
-      loadLatestBuild()
+      const buildRunId = searchParams.get('buildRunId')
+      if (buildRunId) {
+        setSelectedRunId(buildRunId)
+      } else {
+        loadLatestBuild()
+      }
     }
 
-    // Cleanup polling on unmount
     return () => {
       if (pollingIntervalRef.current) {
         clearInterval(pollingIntervalRef.current)
       }
     }
-  }, [selectedProjectId])
-
-  // Debug: Log state changes
-  useEffect(() => {
-    console.log('[DEBUG] State changed:', {
-      submittedRunId,
-      jobStatus,
-      hasJobStatus: !!jobStatus,
-      hasSubmittedRunId: !!submittedRunId,
-      shouldShowCard: !!(jobStatus && submittedRunId)
-    })
-  }, [submittedRunId, jobStatus])
+  }, [selectedProjectId, searchParams])
 
   // Auto-scroll to status card when it appears
   useEffect(() => {
     if (jobStatus && submittedRunId && statusCardRef.current) {
-      console.log('[DEBUG] Scrolling to status card')
       statusCardRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' })
     }
   }, [jobStatus, submittedRunId])
@@ -85,34 +78,23 @@ export default function Evaluate() {
   }, [submittedRunId])
 
   const pollJobStatus = async () => {
-    if (!submittedRunId) {
-      console.log('[DEBUG POLL] No submittedRunId, skipping poll')
-      return
-    }
-
-    console.log('[DEBUG POLL] Polling status for:', submittedRunId)
+    if (!submittedRunId) return
 
     try {
       const status = await evaluationsApi.getStatus(submittedRunId)
-      console.log('[DEBUG POLL] Got status:', status)
 
-      const newStatus = {
+      setJobStatus({
         state: status.state,
         job_url: status.job_url,
         start_time: status.start_time,
-      }
-      setJobStatus(newStatus)
-      console.log('[DEBUG POLL] Updated jobStatus to:', newStatus)
+      })
 
-      // Stop polling if job completed or failed
       if (status.state === 'SUCCESS' || status.state === 'FAILED') {
-        console.log('[DEBUG POLL] Job completed, stopping polling')
         if (pollingIntervalRef.current) {
           clearInterval(pollingIntervalRef.current)
           pollingIntervalRef.current = null
         }
 
-        // If job succeeded, redirect to review page after a short delay
         if (status.state === 'SUCCESS') {
           setTimeout(() => {
             navigate('/review')
@@ -120,7 +102,7 @@ export default function Evaluate() {
         }
       }
     } catch (error) {
-      console.error('[DEBUG POLL] Failed to poll job status:', error)
+      console.error('Failed to poll job status:', error)
     }
   }
 

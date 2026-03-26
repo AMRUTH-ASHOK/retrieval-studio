@@ -122,7 +122,8 @@ for idx_info in indexes_to_delete:
 
     # Remove from index registry
     try:
-        spark.sql(f"DELETE FROM {index_registry} WHERE index_name = '{idx_name}'")
+        safe_idx = str(idx_name).replace("'", "''")
+        spark.sql(f"DELETE FROM {index_registry} WHERE index_name = '{safe_idx}'")
         print(f"  [OK] Registry entry removed")
     except Exception as e:
         print(f"  [WARNING] Failed to remove registry entry: {e}")

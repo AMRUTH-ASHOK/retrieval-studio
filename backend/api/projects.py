@@ -16,6 +16,7 @@ from utils.postgres_state import get_all_projects, get_project, create_project, 
 router = APIRouter()
 
 
+@router.get("", response_model=List[ProjectResponse], include_in_schema=False)
 @router.get("/", response_model=List[ProjectResponse])
 async def list_projects(sql_connector=Depends(get_user_sql_connector)):
     """Get all projects"""
@@ -42,6 +43,7 @@ async def get_project_by_id(project_id: str, sql_connector=Depends(get_user_sql_
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("", response_model=ProjectResponse, include_in_schema=False)
 @router.post("/", response_model=ProjectResponse)
 async def create_new_project(
     project: ProjectCreate,

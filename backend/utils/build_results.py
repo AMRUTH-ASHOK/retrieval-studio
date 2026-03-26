@@ -12,7 +12,7 @@ project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from retrieval_core.configs import config as core_config
+from retrieval_core.configs import Config
 from typing import Dict, Any, List
 
 
@@ -27,10 +27,28 @@ def construct_build_results(
     Construct build results without querying Databricks API.
 
     Supports both per-source builds (new) and legacy builds (old).
+    Uses a local Config copy to avoid mutating the global singleton.
     """
-    type(core_config).UC_CATALOG = catalog
-    type(core_config).CHUNKS_SCHEMA = "chunks"
-    type(core_config).INDEXES_SCHEMA = "indexes"
+    safe_name = Config._safe_name
+
+    def fq_table(schema_name: str, table: str) -> str:
+        return f"{catalog}.{schema_name}.{table}"
+
+    def chunks_table(proj: str, strategy: str, source_name: str = None) -> str:
+        p = safe_name(proj).lower()
+        s = safe_name(strategy).lower()
+        if source_name:
+            src = safe_name(source_name).lower()
+            return fq_table("chunks", f"rs_chunks_{p}_{src}_{s}")
+        return fq_table("chunks", f"rs_chunks_{p}_{s}")
+
+    def index_name(proj: str, strategy: str, source_name: str = None) -> str:
+        p = safe_name(proj).lower()
+        s = safe_name(strategy).lower()
+        if source_name:
+            src = safe_name(source_name).lower()
+            return fq_table("indexes", f"rs_index_{p}_{src}_{s}")
+        return fq_table("indexes", f"rs_index_{p}_{s}")
 
     results = {}
 
@@ -43,14 +61,14 @@ def construct_build_results(
                 results[key] = {
                     "source_name": source_name,
                     "strategy": strategy,
-                    "chunks_table": core_config.chunks_table(project_name, strategy, source_name),
-                    "index_name": core_config.index_name(project_name, strategy, source_name)
+                    "chunks_table": chunks_table(project_name, strategy, source_name),
+                    "index_name": index_name(project_name, strategy, source_name)
                 }
     else:
         for strategy in strategies:
             results[strategy] = {
-                "chunks_table": core_config.chunks_table(project_name, strategy),
-                "index_name": core_config.index_name(project_name, strategy)
+                "chunks_table": chunks_table(project_name, strategy),
+                "index_name": index_name(project_name, strategy)
             }
 
     return results

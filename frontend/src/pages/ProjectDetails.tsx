@@ -184,7 +184,37 @@ export default function ProjectDetails() {
   }
 
   const handleEvaluate = (runId: string) => {
-    navigate('/evaluate')
+    navigate(`/evaluate?buildRunId=${runId}`)
+  }
+
+  const [deletingBuildId, setDeletingBuildId] = useState<string | null>(null)
+  const [deletingEvalId, setDeletingEvalId] = useState<string | null>(null)
+
+  const handleDeleteBuild = async (runId: string) => {
+    if (!window.confirm('Delete this build and all its evaluations? This cannot be undone.')) return
+    setDeletingBuildId(runId)
+    try {
+      await buildsApi.delete(runId)
+      await loadProjectDetails()
+    } catch (e: any) {
+      setError(e?.response?.data?.detail || 'Failed to delete build')
+    } finally {
+      setDeletingBuildId(null)
+    }
+  }
+
+  const handleDeleteEvaluation = async (evalId: string, buildRunId: string) => {
+    if (!window.confirm('Delete this evaluation? This cannot be undone.')) return
+    setDeletingEvalId(evalId)
+    try {
+      await evaluationsApi.delete(evalId)
+      const updated = await evaluationsApi.getByBuildRun(buildRunId)
+      setEvaluations(prev => ({ ...prev, [buildRunId]: updated }))
+    } catch (e: any) {
+      setError(e?.response?.data?.detail || 'Failed to delete evaluation')
+    } finally {
+      setDeletingEvalId(null)
+    }
   }
 
   const handleDeleteProject = async () => {
@@ -225,6 +255,7 @@ export default function ProjectDetails() {
       case 'SUCCESS':
         return <CheckCircle className="w-5 h-5 text-green-600" />
       case 'FAILED':
+      case 'PARTIAL_SUCCESS':
         return <XCircle className="w-5 h-5 text-red-600" />
       case 'RUNNING':
         return <RefreshCw className="w-5 h-5 text-blue-600 animate-spin" />
@@ -240,6 +271,7 @@ export default function ProjectDetails() {
       case 'SUCCESS':
         return <Badge variant="success">{state}</Badge>
       case 'FAILED':
+      case 'PARTIAL_SUCCESS':
         return <Badge variant="error">{state}</Badge>
       case 'RUNNING':
         return <Badge variant="info">{state}</Badge>
@@ -395,12 +427,20 @@ export default function ProjectDetails() {
                     <div className="mb-4 p-3 bg-gray-50 rounded text-sm">
                       <p className="text-databricks-gray-600 mb-1">Configuration:</p>
                       <div className="space-y-1">
-                        {build.config.strategies && (
+                        {build.config.sources && Array.isArray(build.config.sources) ? (
+                          build.config.sources.map((src: any, idx: number) => (
+                            <p key={idx}>
+                              <span className="font-medium">{src.source_name || `Source ${idx + 1}`}</span>
+                              {' '}({src.source_type || 'unknown'}):
+                              {' '}{Object.keys(src.strategies || {}).join(', ') || 'no strategies'}
+                            </p>
+                          ))
+                        ) : build.config.strategies ? (
                           <p>
                             <span className="font-medium">Strategies:</span>{' '}
                             {Object.keys(build.config.strategies).join(', ')}
                           </p>
-                        )}
+                        ) : null}
                         {build.config.embedding_model_endpoint && (
                           <p>
                             <span className="font-medium">Embedding Model:</span>{' '}
@@ -467,6 +507,16 @@ export default function ProjectDetails() {
                           )}
                         </div>
                       ) : null}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleDeleteBuild(build.run_id)}
+                        disabled={deletingBuildId === build.run_id || build.state === 'RUNNING'}
+                        icon={<Trash2 className="w-4 h-4" />}
+                        className="text-red-600 hover:text-red-700 hover:bg-red-50 ml-auto"
+                      >
+                        {deletingBuildId === build.run_id ? 'Deleting...' : 'Delete'}
+                      </Button>
                     </div>
 
                     {/* Evaluation History - Always show for successful builds */}
@@ -501,17 +551,27 @@ export default function ProjectDetails() {
                                       </span>
                                       {getStatusBadge(evaluation.state)}
                                     </div>
-                                    {evaluation.job_url && (
-                                      <a
-                                        href={evaluation.job_url}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="inline-flex items-center text-xs text-databricks-blue hover:underline"
+                                    <div className="flex items-center gap-2">
+                                      {evaluation.job_url && (
+                                        <a
+                                          href={evaluation.job_url}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className="inline-flex items-center text-xs text-databricks-blue hover:underline"
+                                        >
+                                          <ExternalLink className="w-3 h-3 mr-1" />
+                                          View Job
+                                        </a>
+                                      )}
+                                      <button
+                                        onClick={() => handleDeleteEvaluation(evaluation.eval_id, build.run_id)}
+                                        disabled={deletingEvalId === evaluation.eval_id || evaluation.state === 'RUNNING'}
+                                        className="inline-flex items-center text-xs text-red-500 hover:text-red-700 disabled:opacity-40"
+                                        title="Delete evaluation"
                                       >
-                                        <ExternalLink className="w-3 h-3 mr-1" />
-                                        View Job
-                                      </a>
-                                    )}
+                                        <Trash2 className="w-3 h-3" />
+                                      </button>
+                                    </div>
                                   </div>
                                   <div className="text-xs text-databricks-gray-600">
                                     Created: {formatDate(evaluation.created_at)}

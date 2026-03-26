@@ -45,7 +45,7 @@ export default function Build() {
   const [error, setError] = useState('')
   const [submittedRunId, setSubmittedRunId] = useState<string | null>(null)
   const [jobStatus, setJobStatus] = useState<{
-    state: string; job_url: string | null; start_time: number | null; status: any; run_id: string
+    state: string; job_url: string | null; start_time: number | null; status: any; run_id: string; error_message?: string
   } | null>(null)
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null)
 
@@ -81,11 +81,11 @@ export default function Build() {
     if (!submittedRunId) return
     try {
       const status = await buildsApi.getStatus(submittedRunId)
-      setJobStatus({ state: status.state, job_url: status.job_url, start_time: status.start_time, status: status.status, run_id: status.run_id })
+      setJobStatus({ state: status.state, job_url: status.job_url, start_time: status.start_time, status: status.status, run_id: status.run_id, error_message: status.error_message })
       if (status.state === 'SUCCESS') {
         if (pollingIntervalRef.current) { clearInterval(pollingIntervalRef.current); pollingIntervalRef.current = null }
         setTimeout(() => navigate('/evaluate'), 2000)
-      } else if (status.state === 'FAILED') {
+      } else if (status.state === 'FAILED' || status.state === 'PARTIAL_SUCCESS') {
         if (pollingIntervalRef.current) { clearInterval(pollingIntervalRef.current); pollingIntervalRef.current = null }
       }
     } catch (e) { console.error('Failed to poll:', e) }
@@ -144,26 +144,12 @@ export default function Build() {
 
   const totalCombos = useMemo(() => dataSources.reduce((acc, s) => acc + s.strategies.length, 0), [dataSources])
 
-  const canProceedFromStep = (step: number): boolean => {
-    if (step === 0) {
-      const configured = dataSources.filter(s => s.name && s.dataType)
-      return configured.length > 0
-    }
-    if (step === 1) {
-      return totalCombos > 0
-    }
-    if (step === 2) {
-      return embeddingEndpoint.trim() !== '' && vsEndpoint.trim() !== ''
-    }
-    return true
-  }
-
   const getStepError = (step: number): string => {
     if (step === 0) {
       const configured = dataSources.filter(s => s.name && s.dataType)
       if (configured.length === 0) return 'Add at least one source with a name and data type'
-      const noName = dataSources.filter(s => s.dataType && !s.name)
-      if (noName.length > 0) return 'All sources must have a name'
+      const incomplete = dataSources.filter(s => (s.dataType && !s.name) || (s.name && !s.dataType))
+      if (incomplete.length > 0) return 'All sources must have both a name and a data type'
       return ''
     }
     if (step === 1) {
@@ -182,7 +168,7 @@ export default function Build() {
 
   const handleNext = () => {
     const stepError = getStepError(activeStep)
-    if (stepError && !canProceedFromStep(activeStep)) {
+    if (stepError && !stepError.startsWith('Warning:')) {
       setError(stepError)
       return
     }
@@ -232,7 +218,7 @@ export default function Build() {
       setIsSubmitting(false)
       try {
         const status = await buildsApi.getStatus(result.run_id)
-        setJobStatus({ state: status.state, job_url: status.job_url, start_time: status.start_time, status: status.status, run_id: status.run_id })
+        setJobStatus({ state: status.state, job_url: status.job_url, start_time: status.start_time, status: status.status, run_id: status.run_id, error_message: status.error_message })
       } catch {
         setJobStatus({ state: result.state, job_url: result.job_url || null, start_time: new Date(result.created_at).getTime(), status: null, run_id: result.run_id })
       }
@@ -461,19 +447,17 @@ export default function Build() {
                 <tbody>
                   {validSources.map(source => {
                     const dtInfo = dataTypes.find(d => d.name === source.dataType)
-                    return (
-                      {source.strategies.map(strat => {
-                        const tableName = `rs_chunks_${selectedProject?.project_name?.toLowerCase().replace(/[^a-z0-9_-]/g, '_') || 'project'}_${source.name.toLowerCase()}_${strat}`
-                        return (
-                          <tr key={`${source.id}-${strat}`} className="border-b border-databricks-gray-100">
-                            <td className="py-2 px-3 font-medium text-databricks-gray-900">{source.name}</td>
-                            <td className="py-2 px-3"><Badge variant="secondary">{dtInfo?.display_name || source.dataType}</Badge></td>
-                            <td className="py-2 px-3"><Badge variant="info">{strat}</Badge></td>
-                            <td className="py-2 px-3 font-mono text-xs text-databricks-gray-500 truncate max-w-[280px]" title={tableName}>{tableName}</td>
-                          </tr>
-                        )
-                      })}
-                    )
+                    return source.strategies.map(strat => {
+                      const tableName = `rs_chunks_${selectedProject?.project_name?.toLowerCase().replace(/[^a-z0-9_-]/g, '_') || 'project'}_${source.name.toLowerCase()}_${strat}`
+                      return (
+                        <tr key={`${source.id}-${strat}`} className="border-b border-databricks-gray-100">
+                          <td className="py-2 px-3 font-medium text-databricks-gray-900">{source.name}</td>
+                          <td className="py-2 px-3"><Badge variant="secondary">{dtInfo?.display_name || source.dataType}</Badge></td>
+                          <td className="py-2 px-3"><Badge variant="info">{strat}</Badge></td>
+                          <td className="py-2 px-3 font-mono text-xs text-databricks-gray-500 truncate max-w-[280px]" title={tableName}>{tableName}</td>
+                        </tr>
+                      )
+                    })
                   })}
                 </tbody>
               </table>
@@ -573,7 +557,7 @@ export default function Build() {
               <CardContent className="p-6">
                 <div className="flex items-start justify-between mb-6">
                   <h2 className="text-lg font-semibold text-databricks-gray-900">Build Job Status</h2>
-                  <Badge variant={jobStatus.state === 'SUCCESS' ? 'success' : jobStatus.state === 'FAILED' ? 'error' : jobStatus.state === 'RUNNING' ? 'info' : 'warning'}>
+                  <Badge variant={jobStatus.state === 'SUCCESS' ? 'success' : (jobStatus.state === 'FAILED' || jobStatus.state === 'PARTIAL_SUCCESS') ? 'error' : jobStatus.state === 'RUNNING' ? 'info' : 'warning'}>
                     {jobStatus.state === 'SUCCESS' && <CheckCircle className="w-3 h-3 mr-1" />}{jobStatus.state}
                   </Badge>
                 </div>
@@ -614,6 +598,17 @@ export default function Build() {
                 {jobStatus.state === 'SUCCESS' && (
                   <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded-md">
                     <p className="text-sm text-green-800">Build job completed successfully! Redirecting to Evaluate page...</p>
+                  </div>
+                )}
+                {(jobStatus.state === 'FAILED' || jobStatus.state === 'PARTIAL_SUCCESS') && (
+                  <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-md">
+                    <p className="text-sm font-medium text-red-800 mb-1">
+                      {jobStatus.state === 'FAILED' ? 'Build job failed' : 'Build partially failed'}
+                    </p>
+                    {jobStatus.error_message && (
+                      <p className="text-sm text-red-700 font-mono whitespace-pre-wrap">{jobStatus.error_message}</p>
+                    )}
+                    <p className="text-xs text-red-600 mt-2">Check the Databricks job link above for full logs.</p>
                   </div>
                 )}
               </CardContent>

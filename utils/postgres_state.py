@@ -11,14 +11,15 @@ import json
 
 def initialize_tables():
     """
-    Initialize Postgres schema
-
-    Note: Run postgres_schema.sql manually first in Lakebase SQL Editor
-    This function just validates the tables exist.
+    Initialize Postgres schema — auto-creates any missing tables on startup.
+    Core tables (projects, builds, evaluations, job_runs) must already exist
+    (created via postgres_schema.sql in Lakebase SQL Editor).
+    Migration tables (index_selections, studies, study_builds, study_evaluations)
+    are created automatically with CREATE TABLE IF NOT EXISTS.
     """
     connector = get_postgres_connector()
 
-    # Test connection and verify tables exist
+    # Verify core tables exist
     try:
         tables = connector.execute("""
             SELECT table_name FROM information_schema.tables
@@ -31,16 +32,75 @@ def initialize_tables():
         missing = expected - set(table_names)
 
         if missing:
-            print(f"⚠️  Warning: Missing tables: {missing}")
+            print(f"⚠️  Warning: Missing core tables: {missing}")
             print("   Run postgres_schema.sql in Lakebase SQL Editor to create them")
             return False
 
         print(f"✅ All required tables exist: {', '.join(table_names)}")
-        return True
 
     except Exception as e:
         print(f"❌ Failed to verify tables: {e}")
         return False
+
+    # Auto-run migration 002: index_selections and studies tables
+    # Use fetch="none" for DDL statements (no rows returned)
+    try:
+        connector.execute("""
+            CREATE TABLE IF NOT EXISTS index_selections (
+                id VARCHAR(50) PRIMARY KEY,
+                project_id VARCHAR(50) REFERENCES projects(project_id) ON DELETE CASCADE,
+                build_run_id VARCHAR(50),
+                source_name VARCHAR(255),
+                strategy_name VARCHAR(255),
+                index_name VARCHAR(500),
+                chunks_table VARCHAR(500),
+                vs_endpoint VARCHAR(255),
+                status VARCHAR(50) DEFAULT 'active',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            )
+        """, fetch="none")
+        connector.execute("""
+            CREATE INDEX IF NOT EXISTS idx_index_selections_project
+            ON index_selections(project_id)
+        """, fetch="none")
+        connector.execute("""
+            CREATE INDEX IF NOT EXISTS idx_index_selections_status
+            ON index_selections(status)
+        """, fetch="none")
+        connector.execute("""
+            CREATE TABLE IF NOT EXISTS studies (
+                study_id VARCHAR(50) PRIMARY KEY,
+                project_id VARCHAR(50) REFERENCES projects(project_id) ON DELETE CASCADE,
+                study_name VARCHAR(255) NOT NULL,
+                description TEXT,
+                status VARCHAR(50) DEFAULT 'active',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            )
+        """, fetch="none")
+        connector.execute("""
+            CREATE INDEX IF NOT EXISTS idx_studies_project ON studies(project_id)
+        """, fetch="none")
+        connector.execute("""
+            CREATE TABLE IF NOT EXISTS study_builds (
+                study_id VARCHAR(50) REFERENCES studies(study_id) ON DELETE CASCADE,
+                build_run_id VARCHAR(50) REFERENCES builds(run_id) ON DELETE CASCADE,
+                PRIMARY KEY (study_id, build_run_id)
+            )
+        """, fetch="none")
+        connector.execute("""
+            CREATE TABLE IF NOT EXISTS study_evaluations (
+                study_id VARCHAR(50) REFERENCES studies(study_id) ON DELETE CASCADE,
+                eval_id VARCHAR(50) REFERENCES evaluations(eval_id) ON DELETE CASCADE,
+                PRIMARY KEY (study_id, eval_id)
+            )
+        """, fetch="none")
+        print("✅ Migration 002 applied: index_selections, studies, study_builds, study_evaluations")
+    except Exception as e:
+        print(f"⚠️  Migration 002 warning (non-fatal): {e}")
+
+    return True
 
 
 # ============================================================================
@@ -279,6 +339,36 @@ def update_build_state(
         result['config'] = json.loads(result['config']) if isinstance(result['config'], str) else result['config']
 
     return result
+
+
+def delete_build(run_id: str) -> bool:
+    """Delete a build and its associated evaluations. Returns True if deleted."""
+    connector = get_postgres_connector()
+
+    build = get_build(run_id)
+    if not build:
+        return False
+
+    connector.execute(
+        "DELETE FROM evaluations WHERE run_id = %s",
+        (run_id,), fetch="none"
+    )
+    connector.execute(
+        "DELETE FROM builds WHERE run_id = %s",
+        (run_id,), fetch="none"
+    )
+    return True
+
+
+def delete_evaluation(eval_id: str) -> bool:
+    """Delete a single evaluation. Returns True if deleted."""
+    connector = get_postgres_connector()
+
+    result = connector.execute(
+        "DELETE FROM evaluations WHERE eval_id = %s RETURNING eval_id",
+        (eval_id,), fetch="one"
+    )
+    return result is not None
 
 
 # ============================================================================
@@ -528,9 +618,13 @@ def bulk_update_index_status(project_id: str, updates: List[Dict[str, str]]) -> 
     connector = get_postgres_connector()
     count = 0
     for upd in updates:
+        upd_id = upd.get("id")
+        upd_status = upd.get("status")
+        if not upd_id or not upd_status:
+            continue
         result = connector.execute(
             "UPDATE index_selections SET status = %s WHERE id = %s AND project_id = %s RETURNING id",
-            (upd["status"], upd["id"], project_id),
+            (upd_status, upd_id, project_id),
             fetch="one"
         )
         if result:
@@ -603,12 +697,19 @@ def add_evaluation_to_study(study_id: str, eval_id: str):
 def get_study_builds(study_id: str) -> List[Dict[str, Any]]:
     """Get all builds for a study"""
     connector = get_postgres_connector()
-    return connector.execute(
+    builds = connector.execute(
         """SELECT b.* FROM builds b
            JOIN study_builds sb ON b.run_id = sb.build_run_id
            WHERE sb.study_id = %s ORDER BY b.created_at DESC""",
         (study_id,)
     )
+    for build in builds:
+        if isinstance(build.get("config"), str):
+            try:
+                build["config"] = json.loads(build["config"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+    return builds
 
 
 def get_study_evaluations(study_id: str) -> List[Dict[str, Any]]:
