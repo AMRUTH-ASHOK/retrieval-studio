@@ -169,6 +169,15 @@ class QueryGenerator:
         # Load corpus
         df = spark_session.table(corpus_table)
 
+        # Filter out parent chunks from parent_child strategy tables
+        # Only child chunks should be used for query generation since the VS index
+        # only contains children
+        if "chunk_type" in df.columns:
+            parent_count = df.filter(df["chunk_type"] == "parent").count()
+            if parent_count > 0:
+                df = df.filter(df["chunk_type"] != "parent")
+                print(f"  Filtered out {parent_count} parent chunks, using {df.count()} child/other chunks")
+
         # Build text column
         if len(columns) == 1:
             text_col = columns[0]

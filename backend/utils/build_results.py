@@ -58,10 +58,14 @@ def construct_build_results(
             source_strategies = source.get("strategies", {})
             for strategy in source_strategies:
                 key = f"{source_name}__{strategy}"
+                ct = chunks_table(project_name, strategy, source_name)
+                # For parent_child, use the __indexable table (children only) as corpus
+                # so auto-generated queries match what's actually in the VS index
+                corpus = ct + "__indexable" if strategy == "parent_child" else ct
                 results[key] = {
                     "source_name": source_name,
                     "strategy": strategy,
-                    "chunks_table": chunks_table(project_name, strategy, source_name),
+                    "chunks_table": corpus,
                     "index_name": index_name(project_name, strategy, source_name)
                 }
     else:
