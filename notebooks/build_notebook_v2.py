@@ -3,7 +3,7 @@
 # MAGIC # Retrieval Studio - Build Job (Product)
 
 # COMMAND ----------
-# MAGIC %pip install databricks-vectorsearch mlflow "databricks-sdk>=0.61.0" --quiet
+# MAGIC %pip install databricks-vectorsearch mlflow "databricks-sdk>=0.61.0" pymupdf python-docx --quiet
 # COMMAND ----------
 dbutils.library.restartPython()
 
@@ -119,32 +119,50 @@ ensure_uc_schemas()
 
 def _load_single_source(src_type, src_config):
     """Load documents from a single data source by type and config."""
+    print(f"\n[DEBUG _load_single_source] ENTRY")
+    print(f"[DEBUG _load_single_source]   src_type = {repr(src_type)}")
+    print(f"[DEBUG _load_single_source]   src_config keys = {list(src_config.keys())}")
+    print(f"[DEBUG _load_single_source]   src_config = {json.dumps(src_config, default=str)[:500]}")
+
     src_handler = get_data_type_handler(src_type)
+    print(f"[DEBUG _load_single_source]   handler = {type(src_handler).__name__}")
+
     volume_path = src_config.get("volume_path")
+    print(f"[DEBUG _load_single_source]   volume_path = {repr(volume_path)}")
 
     if volume_path:
-        print(f"[INFO] Loading {src_type} documents from UC Volume: {volume_path}")
+        print(f"[DEBUG _load_single_source] Entering VOLUME PATH branch")
 
         # Diagnostic: verify path is accessible
         try:
             from databricks.sdk.runtime import dbutils
             file_pattern = src_config.get("file_pattern", "*.*")
+            print(f"[DEBUG VOLUME] Calling dbutils.fs.ls('{volume_path}')...")
             all_items = dbutils.fs.ls(volume_path)
-            print(f"[DEBUG] dbutils.fs.ls('{volume_path}') returned {len(all_items)} items:")
-            for item in all_items[:20]:
-                print(f"  {'[DIR]' if item.isDir() else '[FILE]'} {item.name} ({item.size} bytes) path={item.path}")
-            if len(all_items) > 20:
-                print(f"  ... and {len(all_items) - 20} more items")
+            print(f"[DEBUG VOLUME] dbutils.fs.ls returned {len(all_items)} items:")
+            for item in all_items[:30]:
+                print(f"  {'[DIR]' if item.isDir() else '[FILE]'} name={repr(item.name)} size={item.size} path={repr(item.path)}")
+            if len(all_items) > 30:
+                print(f"  ... and {len(all_items) - 30} more items")
 
             import fnmatch
-            matched = [f for f in all_items if not f.isDir() and fnmatch.fnmatch(f.name, file_pattern)]
-            print(f"[DEBUG] Files matching pattern '{file_pattern}': {len(matched)}")
+            non_dirs = [f for f in all_items if not f.isDir()]
+            print(f"[DEBUG VOLUME] Non-directory items: {len(non_dirs)}")
+            matched = [f for f in non_dirs if fnmatch.fnmatch(f.name, file_pattern)]
+            print(f"[DEBUG VOLUME] Files matching pattern '{file_pattern}': {len(matched)}")
+            for m in matched[:10]:
+                print(f"  MATCH: {repr(m.name)} ({m.size} bytes)")
             if not matched:
-                print(f"[WARNING] No files matched pattern '{file_pattern}'. Available file names: {[f.name for f in all_items if not f.isDir()][:20]}")
+                print(f"[WARNING VOLUME] No files matched '{file_pattern}'!")
+                print(f"[DEBUG VOLUME] Available file names: {[f.name for f in non_dirs][:30]}")
+                print(f"[DEBUG VOLUME] Available file extensions: {set(f.name.rsplit('.', 1)[-1] if '.' in f.name else '(none)' for f in non_dirs)}")
         except Exception as diag_err:
-            print(f"[ERROR] Failed to list volume path '{volume_path}': {diag_err}")
+            print(f"[ERROR VOLUME] dbutils.fs.ls('{volume_path}') FAILED: {type(diag_err).__name__}: {diag_err}")
+            import traceback
+            traceback.print_exc()
 
         uc_volume_handler = get_data_type_handler("uc_volume")
+        print(f"[DEBUG VOLUME] uc_volume_handler = {type(uc_volume_handler).__name__}")
         volume_config = {
             "volume_path": volume_path,
             "file_pattern": src_config.get("file_pattern", "*.*"),
@@ -158,20 +176,37 @@ def _load_single_source(src_type, src_config):
             "extract_images": src_config.get("extract_images", False),
             "ocr_enabled": src_config.get("ocr_enabled", False),
         }
-        docs = uc_volume_handler.load_documents(volume_config)
-        print(f"[INFO] Loaded {len(docs)} documents from UC Volume")
+        print(f"[DEBUG VOLUME] Calling uc_volume_handler.load_documents() with config:")
+        print(f"[DEBUG VOLUME]   {json.dumps(volume_config, default=str)[:500]}")
+        try:
+            docs = uc_volume_handler.load_documents(volume_config)
+            print(f"[DEBUG VOLUME] load_documents returned {len(docs)} documents")
+            if docs:
+                print(f"[DEBUG VOLUME]   First doc: id={docs[0].doc_id}, name={docs[0].doc_name}, text_len={len(docs[0].text)}")
+            else:
+                print(f"[WARNING VOLUME] load_documents returned EMPTY list!")
+        except Exception as load_err:
+            print(f"[ERROR VOLUME] load_documents FAILED: {type(load_err).__name__}: {load_err}")
+            import traceback
+            traceback.print_exc()
+            docs = []
         return docs
 
     if src_type == "delta_table":
+        print(f"[DEBUG _load_single_source] Entering DELTA TABLE branch")
         table_name = src_config.get("table_name", "")
         text_column = src_config.get("text_column", "text")
         id_column = src_config.get("id_column")
         max_rows = int(src_config.get("max_rows", 2000))
+        print(f"[DEBUG DELTA] table={table_name}, text_col={text_column}, id_col={id_column}, max_rows={max_rows}")
 
         df = spark.table(table_name).select(
             *([id_column] if id_column else []),
             text_column
         ).limit(max_rows)
+
+        row_count = df.count()
+        print(f"[DEBUG DELTA] Query returned {row_count} rows")
 
         docs = []
         for row in df.toLocalIterator():
@@ -187,9 +222,14 @@ def _load_single_source(src_type, src_config):
                 metadata={"source_table": table_name},
                 data_type="delta_table",
             ))
+        print(f"[DEBUG DELTA] Created {len(docs)} documents")
         return docs
 
-    return src_handler.load_documents(src_config)
+    print(f"[DEBUG _load_single_source] Entering FALLBACK branch (src_handler.load_documents)")
+    print(f"[DEBUG _load_single_source]   Calling {type(src_handler).__name__}.load_documents(src_config)")
+    docs = src_handler.load_documents(src_config)
+    print(f"[DEBUG _load_single_source]   Fallback returned {len(docs)} documents")
+    return docs
 
 
 sources = config.get("sources", [])
@@ -275,11 +315,24 @@ with mlflow.start_run(run_name=f"build_{run_id[:8]}") as parent_run:
     except Exception as e:
         print(f"[WARNING] Failed to store build_parent_run_id for run_id={run_id}: {e}")
 
+    print(f"\n[DEBUG] ========== SOURCES DUMP ==========")
+    print(f"[DEBUG] Number of sources: {len(sources)}")
+    for i, s in enumerate(sources):
+        print(f"[DEBUG] Source[{i}] raw keys: {list(s.keys())}")
+        print(f"[DEBUG] Source[{i}] = {json.dumps(s, default=str)[:500]}")
+    print(f"[DEBUG] ====================================\n")
+
     for source_idx, source in enumerate(sources):
         source_name = source.get("source_name")
         source_type = source.get("source_type")
         source_config = source.get("config", {})
         source_strategies = source.get("strategies", {})
+
+        print(f"\n[DEBUG] --- Processing source[{source_idx}] ---")
+        print(f"[DEBUG]   source_name = {repr(source_name)}")
+        print(f"[DEBUG]   source_type = {repr(source_type)}")
+        print(f"[DEBUG]   source_config = {json.dumps(source_config, default=str)[:300]}")
+        print(f"[DEBUG]   source_strategies = {json.dumps(source_strategies, default=str)[:300]}")
 
         if not source_name or not source_type:
             print(f"[WARNING] Skipping source {source_idx}: missing source_name or source_type")
@@ -299,6 +352,8 @@ with mlflow.start_run(run_name=f"build_{run_id[:8]}") as parent_run:
             documents = _load_single_source(source_type, source_config)
         except Exception as e:
             print(f"[ERROR] Failed to load source '{source_name}': {e}")
+            import traceback
+            traceback.print_exc()
             for sn in source_strategies:
                 key = f"{source_name}__{sn}"
                 strategy_results[key] = {"status": "FAILED", "error": f"Source load failed: {str(e)}"}
@@ -356,7 +411,8 @@ with mlflow.start_run(run_name=f"build_{run_id[:8]}") as parent_run:
 
                     df = spark.createDataFrame(rows, schema=CHUNKS_SCHEMA).drop("created_at").withColumn("created_at", current_timestamp())
 
-                    if spark.catalog.tableExists(chunks_table):
+                    table_exists = spark.catalog.tableExists(chunks_table)
+                    if table_exists:
                         (df.write.format("delta")
                            .mode("overwrite")
                            .option("replaceWhere", f"run_id = '{run_id}'")
@@ -366,15 +422,15 @@ with mlflow.start_run(run_name=f"build_{run_id[:8]}") as parent_run:
                            .mode("overwrite")
                            .partitionBy("run_id")
                            .saveAsTable(chunks_table))
-
-                    spark.sql(f"ALTER TABLE {chunks_table} SET TBLPROPERTIES (delta.enableChangeDataFeed = true)")
+                        spark.sql(f"ALTER TABLE {chunks_table} SET TBLPROPERTIES (delta.enableChangeDataFeed = true)")
 
                     source_for_index = chunks_table
                     if strategy_name == "parent_child":
                         indexable_table = core_config.chunks_indexable_table(project_name, strategy_name, source_name)
                         children_df = df.filter(col("chunk_type") == lit("child"))
 
-                        if spark.catalog.tableExists(indexable_table):
+                        idx_table_exists = spark.catalog.tableExists(indexable_table)
+                        if idx_table_exists:
                             (children_df.write.format("delta")
                                .mode("overwrite")
                                .option("replaceWhere", f"run_id = '{run_id}'")
@@ -384,8 +440,14 @@ with mlflow.start_run(run_name=f"build_{run_id[:8]}") as parent_run:
                                .mode("overwrite")
                                .partitionBy("run_id")
                                .saveAsTable(indexable_table))
+                            spark.sql(f"ALTER TABLE {indexable_table} SET TBLPROPERTIES (delta.enableChangeDataFeed = true)")
 
-                        spark.sql(f"ALTER TABLE {indexable_table} SET TBLPROPERTIES (delta.enableChangeDataFeed = true)")
+                        # Ensure CDF is enabled even for pre-existing tables
+                        if idx_table_exists:
+                            try:
+                                spark.sql(f"ALTER TABLE {indexable_table} SET TBLPROPERTIES (delta.enableChangeDataFeed = true)")
+                            except Exception:
+                                pass
                         source_for_index = indexable_table
 
                     idx_name = core_config.index_name(project_name, strategy_name, source_name)
@@ -410,7 +472,7 @@ with mlflow.start_run(run_name=f"build_{run_id[:8]}") as parent_run:
 
                     spark.sql(f"DELETE FROM {index_registry} WHERE project = '{_esc(project_name)}' AND source_name = '{_esc(source_name)}' AND strategy = '{_esc(strategy_name)}'")
                     spark.sql(f"""
-                      INSERT INTO {index_registry}
+                      INSERT INTO {index_registry} (project, source_name, strategy, vs_endpoint, index_name, source_table, embedding_endpoint, updated_at)
                       VALUES ('{_esc(project_name)}', '{_esc(source_name)}', '{_esc(strategy_name)}', '{_esc(vs_endpoint_name)}', '{_esc(idx_name)}', '{_esc(source_for_index)}', '{_esc(embedding_model_endpoint)}', current_timestamp())
                     """)
 

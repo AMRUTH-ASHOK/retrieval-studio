@@ -285,34 +285,56 @@ class UCVolumeDataType(DataTypeHandler):
         file_pattern = config.get("file_pattern", "*.txt")
         recursive = config.get("recursive", False)
 
+        print(f"[DEBUG UCVolume.load_documents] ENTRY")
+        print(f"[DEBUG UCVolume.load_documents]   volume_path = {repr(volume_path)}")
+        print(f"[DEBUG UCVolume.load_documents]   file_pattern = {repr(file_pattern)}")
+        print(f"[DEBUG UCVolume.load_documents]   recursive = {recursive}")
+        print(f"[DEBUG UCVolume.load_documents]   full config = {config}")
+
         if not volume_path:
             raise ValueError("volume_path is required for UC Volume data type")
 
         documents = []
 
         try:
-            # Import dbutils for Databricks file system access
             from databricks.sdk.runtime import dbutils
+            print(f"[DEBUG UCVolume] dbutils imported successfully")
 
-            # List files in the volume
             files_to_process = []
 
             if recursive:
+                print(f"[DEBUG UCVolume] Using RECURSIVE listing")
                 files_to_process = self._list_files_recursive(dbutils, volume_path, file_pattern)
+                print(f"[DEBUG UCVolume] Recursive listing found {len(files_to_process)} files")
             else:
+                print(f"[DEBUG UCVolume] Using NON-RECURSIVE listing")
                 try:
+                    print(f"[DEBUG UCVolume] Calling dbutils.fs.ls('{volume_path}')...")
                     all_files = dbutils.fs.ls(volume_path)
-                    print(f"[DEBUG UCVolume] Listed {len(all_files)} items in '{volume_path}'")
+                    print(f"[DEBUG UCVolume] dbutils.fs.ls returned {len(all_files)} items")
+                    for idx, f in enumerate(all_files[:30]):
+                        is_match = not f.isDir() and fnmatch.fnmatch(f.name, file_pattern)
+                        print(f"[DEBUG UCVolume]   [{idx}] name={repr(f.name)} isDir={f.isDir()} size={f.size} path={repr(f.path)} matchesPattern={is_match}")
+
                     files_to_process = [
                         f.path for f in all_files
                         if not f.isDir() and fnmatch.fnmatch(f.name, file_pattern)
                     ]
                     print(f"[DEBUG UCVolume] {len(files_to_process)} files match pattern '{file_pattern}'")
+                    for fp in files_to_process[:10]:
+                        print(f"[DEBUG UCVolume]   -> {fp}")
                 except Exception as e:
+                    print(f"[ERROR UCVolume] dbutils.fs.ls FAILED: {type(e).__name__}: {e}")
+                    import traceback
+                    traceback.print_exc()
                     raise ValueError(f"Failed to list files in volume path '{volume_path}': {str(e)}")
 
-            # Process each file
-            for file_path in files_to_process:
+            if not files_to_process:
+                print(f"[WARNING UCVolume] NO files to process! Returning empty list.")
+                return documents
+
+            for file_idx, file_path in enumerate(files_to_process):
+                print(f"[DEBUG UCVolume] Processing file [{file_idx}]: {file_path}")
                 try:
                     docs = self._load_file_from_volume(dbutils, file_path, config)
                     if docs:
@@ -320,19 +342,28 @@ class UCVolumeDataType(DataTypeHandler):
                             documents.extend(docs)
                         else:
                             documents.append(docs)
-                        print(f"[DEBUG UCVolume] Loaded {len(docs) if isinstance(docs, list) else 1} doc(s) from {file_path}")
+                        doc_count = len(docs) if isinstance(docs, list) else 1
+                        print(f"[DEBUG UCVolume]   -> Loaded {doc_count} doc(s)")
                     else:
-                        print(f"[WARNING UCVolume] _load_file_from_volume returned empty for {file_path}")
+                        print(f"[WARNING UCVolume]   -> _load_file_from_volume returned empty/None")
                 except Exception as e:
-                    print(f"[WARNING] Failed to load file {file_path}: {str(e)}")
+                    print(f"[ERROR UCVolume]   -> Failed to load: {type(e).__name__}: {e}")
+                    import traceback
+                    traceback.print_exc()
                     continue
 
-            print(f"[INFO UCVolume] Total documents loaded: {len(documents)}")
+            print(f"[INFO UCVolume] TOTAL documents loaded: {len(documents)}")
             return documents
 
-        except ImportError:
+        except ImportError as ie:
+            print(f"[ERROR UCVolume] ImportError: {ie}")
             raise ValueError("dbutils not available - UC Volume access requires Databricks runtime")
+        except ValueError:
+            raise
         except Exception as e:
+            print(f"[ERROR UCVolume] Unexpected error: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
             raise ValueError(f"Failed to load documents from UC Volume: {str(e)}")
 
     def _list_files_recursive(self, dbutils, path: str, pattern: str) -> List[str]:
@@ -364,15 +395,36 @@ class UCVolumeDataType(DataTypeHandler):
 
         filename = os.path.basename(file_path)
         file_ext = os.path.splitext(filename)[1].lower()
+        print(f"[DEBUG _load_file] file_path={repr(file_path)}, filename={repr(filename)}, ext={repr(file_ext)}")
 
-        # Read file content (limit to 10MB)
+        # Download all files via Databricks SDK Files API (works on serverless)
         try:
-            content = dbutils.fs.head(file_path, maxBytes=10*1024*1024)
+            from databricks.sdk import WorkspaceClient
+            from databricks.sdk.core import Config
+            w = WorkspaceClient(config=Config())
+
+            volume_file_path = file_path
+            if volume_file_path.startswith("dbfs:"):
+                volume_file_path = volume_file_path[len("dbfs:"):]
+
+            print(f"[DEBUG _load_file] Downloading via Files API: {volume_file_path}")
+            resp = w.files.download(volume_file_path)
+            raw_bytes = resp.contents.read()
+            print(f"[DEBUG _load_file] Downloaded {len(raw_bytes)} bytes")
+
+            text_exts = {'.txt', '.csv', '.json', '.md', '.log'}
+            if file_ext in text_exts:
+                content = raw_bytes.decode('utf-8', errors='replace')
+            else:
+                content = raw_bytes
         except Exception as e:
-            print(f"[ERROR] Failed to read file {file_path}: {str(e)}")
+            print(f"[ERROR _load_file] Failed to download file {file_path}: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
             return []
 
         # Route based on file extension
+        print(f"[DEBUG _load_file] Routing to handler for extension '{file_ext}'")
         if file_ext == '.txt':
             # Plain text file
             doc = Document(
@@ -389,11 +441,9 @@ class UCVolumeDataType(DataTypeHandler):
             return [doc]
 
         elif file_ext == '.pdf':
-            # PDF file - use PDF handler
             pdf_handler = PDFDataType()
-            # Create a file-like object from content
             import io
-            file_obj = io.BytesIO(content.encode('utf-8') if isinstance(content, str) else content)
+            file_obj = io.BytesIO(content if isinstance(content, bytes) else content.encode('utf-8'))
             file_obj.name = filename
 
             pdf_docs = pdf_handler.load_documents({
@@ -457,7 +507,7 @@ class UCVolumeDataType(DataTypeHandler):
         elif file_ext in ('.docx', '.doc'):
             docx_handler = DocxDataType()
             import io
-            file_obj = io.BytesIO(content.encode('utf-8') if isinstance(content, str) else content)
+            file_obj = io.BytesIO(content if isinstance(content, bytes) else content.encode('utf-8'))
             file_obj.name = filename
 
             docx_docs = docx_handler.load_documents({
@@ -472,7 +522,22 @@ class UCVolumeDataType(DataTypeHandler):
             return docx_docs
 
         else:
-            print(f"[WARNING] Unsupported file type: {file_ext} for file {file_path}")
+            # Fallback: try to read as plain text
+            print(f"[WARNING] No dedicated handler for '{file_ext}', attempting plain text read for {filename}")
+            try:
+                text = content if isinstance(content, str) else content.decode('utf-8', errors='replace')
+                if text.strip():
+                    doc = Document(
+                        doc_id=str(uuid.uuid4()),
+                        doc_name=filename,
+                        text=text,
+                        metadata={"source_type": "uc_volume", "file_path": file_path, "file_extension": file_ext},
+                        data_type="uc_volume"
+                    )
+                    return [doc]
+            except Exception:
+                pass
+            print(f"[WARNING] Could not load {filename} as text either, skipping.")
             return []
     
     def get_compatible_strategies(self) -> List[str]:

@@ -15,6 +15,11 @@ class ProjectResponse(BaseModel):
     project_id: str
     project_name: str
     description: Optional[str] = None
+    catalog: Optional[str] = None
+    db_schema: Optional[str] = None
+    vs_endpoint_name: Optional[str] = None
+    embedding_model_endpoint: Optional[str] = None
+    experiment_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

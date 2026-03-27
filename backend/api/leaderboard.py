@@ -70,7 +70,7 @@ async def get_project_leaderboard(project_id: str, sql_connector=Depends(get_sql
                 AVG(CAST(get_json_object(e.metrics, '$.ndcg_at_10') AS DOUBLE)) as avg_ndcg_at_10,
                 COUNT(*) as num_queries
             FROM {escape_identifier(settings.CATALOG)}.{escape_identifier(settings.SCHEMA)}.rl_runs r
-            JOIN {escape_identifier(settings.CATALOG)}.raw.rs_eval_results e
+            JOIN {escape_identifier(settings.CATALOG)}.{escape_identifier(settings.SCHEMA)}.rs_eval_results e
             ON r.run_id = e.build_run_id
             WHERE r.project_id = ?
             GROUP BY r.run_id, r.created_at, e.strategy

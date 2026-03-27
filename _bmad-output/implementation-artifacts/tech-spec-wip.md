@@ -2,8 +2,23 @@
 title: 'Retrieval Studio - Per-Source Strategy & Resource Management'
 slug: 'retrieval-studio-per-source-strategy-resource-management'
 created: '2026-03-25'
-status: 'planning'
-stepsCompleted: []
+status: 'implemented'
+stepsCompleted:
+  - Per-source strategy assignment (Build UI wizard)
+  - Per-source-strategy delta table and VS index creation
+  - Word/DOCX data type handler
+  - Multi-corpus golden dataset auto-generation
+  - Per-source comparison view in Review page
+  - LLM-generated strategy comparison explanations
+  - Index selection/retention UI
+  - Resource cleanup API and UI
+  - Study management (DB + API + UI)
+  - Database schema (index_selections, studies, study_builds, study_evaluations)
+  - Build/evaluation delete from Project Details
+  - Binary file download via Databricks SDK Files API (serverless-safe)
+  - Query Details per-strategy filter, chunk IDs, metric breakdown with match highlighting
+  - Build status inspection (notebook exit value for FAILED/PARTIAL_SUCCESS)
+  - Cleanup job status polling via dedicated endpoint
 tech_stack:
   - React 18 + TypeScript + Vite
   - TailwindCSS
@@ -36,10 +51,11 @@ files_to_modify:
   - notebooks/eval_notebook.py
   - database/postgres_schema.sql
 files_to_create:
-  - backend/api/cleanup.py
-  - frontend/src/pages/Cleanup.tsx
-  - frontend/src/components/review/SourceComparison.tsx
-  - frontend/src/components/review/StrategyExplanation.tsx
+  - backend/api/cleanup.py (CREATED)
+  - backend/api/studies.py (CREATED)
+  - frontend/src/components/review/SourceComparison.tsx (CREATED)
+  - notebooks/cleanup_notebook.py (CREATED)
+  - database/migrations/002_add_index_selections_and_studies.sql (CREATED)
 code_patterns:
   - Registry Pattern (DATA_TYPE_REGISTRY for handlers)
   - Factory Pattern (get_data_type_handler)

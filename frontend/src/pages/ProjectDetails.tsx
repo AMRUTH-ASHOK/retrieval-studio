@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Plus, ExternalLink, Play, RefreshCw, CheckCircle, XCircle, Clock, AlertCircle, ChevronDown, ChevronRight, Trash2, Database, Shield, BookOpen } from 'lucide-react'
+import { ArrowLeft, Plus, ExternalLink, Play, RefreshCw, CheckCircle, XCircle, Clock, AlertCircle, ChevronDown, ChevronRight, Trash2, Database, Shield } from 'lucide-react'
 import { projectsApi } from '../services/projects'
 import { buildsApi } from '../services/builds'
 import { evaluationsApi } from '../services/evaluations'
@@ -34,17 +34,15 @@ export default function ProjectDetails() {
   const [cleanupResult, setCleanupResult] = useState<any>(null)
   const [showCleanupModal, setShowCleanupModal] = useState(false)
 
-  // Study state
-  const [studies, setStudies] = useState<any[]>([])
-  const [showNewStudy, setShowNewStudy] = useState(false)
-  const [newStudyName, setNewStudyName] = useState('')
-  const [newStudyDesc, setNewStudyDesc] = useState('')
+  // MLflow experiment state
+  const [mlflowUrl, setMlflowUrl] = useState<string | null>(null)
+  const [experimentName, setExperimentName] = useState<string | null>(null)
 
   useEffect(() => {
     if (projectId) {
+      setSelectedProjectId(projectId)
       loadProjectDetails()
       loadIndexSelections()
-      loadStudies()
     }
   }, [projectId])
 
@@ -56,12 +54,15 @@ export default function ProjectDetails() {
     } catch { setIndexSelections([]) }
   }
 
-  const loadStudies = async () => {
+  const loadMlflowExperiment = async () => {
     if (!projectId) return
     try {
-      const response = await api.get(`/studies/project/${projectId}`)
-      setStudies(response.data || [])
-    } catch { setStudies([]) }
+      const data = await projectsApi.getMLflowExperiment(projectId)
+      setMlflowUrl(data.mlflow_url || null)
+      setExperimentName(data.experiment_name || null)
+    } catch {
+      setMlflowUrl(null)
+    }
   }
 
   const handleToggleIndexStatus = async (selectionId: string, currentStatus: string) => {
@@ -93,7 +94,7 @@ export default function ProjectDetails() {
       if (response.data.job_run_id) {
         const pollCleanup = setInterval(async () => {
           try {
-            const statusResp = await api.get(`/builds/${response.data.job_run_id}/status`)
+            const statusResp = await api.get(`/cleanup/job/${response.data.job_run_id}/status`)
             const state = statusResp.data?.state
             if (state === 'SUCCESS' || state === 'FAILED') {
               clearInterval(pollCleanup)
@@ -113,23 +114,6 @@ export default function ProjectDetails() {
     }
   }
 
-  const handleCreateStudy = async () => {
-    if (!projectId || !newStudyName) return
-    try {
-      await api.post('/studies/', { project_id: projectId, study_name: newStudyName, description: newStudyDesc })
-      setNewStudyName('')
-      setNewStudyDesc('')
-      setShowNewStudy(false)
-      loadStudies()
-    } catch (e) { console.error('Failed to create study:', e) }
-  }
-
-  const handleDeleteStudy = async (studyId: string) => {
-    try {
-      await api.delete(`/studies/${studyId}`)
-      loadStudies()
-    } catch (e) { console.error('Failed to delete study:', e) }
-  }
 
   const loadProjectDetails = async () => {
     if (!projectId) return
@@ -143,8 +127,23 @@ export default function ProjectDetails() {
 
       // Load builds for this project
       const buildsData = await buildsApi.getByProject(projectId)
-      // Sort by created_at descending (most recent first)
-      const sortedBuilds = buildsData.sort(
+
+      // Refresh status for any builds still marked RUNNING/PENDING
+      const refreshedBuilds = await Promise.all(
+        buildsData.map(async (build: BuildJob) => {
+          if (build.state === 'RUNNING' || build.state === 'PENDING') {
+            try {
+              const status = await buildsApi.getStatus(build.run_id)
+              return { ...build, state: status.state, job_url: status.job_url || build.job_url }
+            } catch {
+              return build
+            }
+          }
+          return build
+        })
+      )
+
+      const sortedBuilds = refreshedBuilds.sort(
         (a: BuildJob, b: BuildJob) =>
           new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
       )
@@ -164,6 +163,11 @@ export default function ProjectDetails() {
         })
       )
       setEvaluations(evalsMap)
+
+      // Load MLflow experiment link if builds exist
+      if (sortedBuilds.length > 0) {
+        loadMlflowExperiment()
+      }
     } catch (err: any) {
       console.error('Failed to load project details:', err)
       setError(err?.response?.data?.detail || 'Failed to load project details')
@@ -340,6 +344,19 @@ export default function ProjectDetails() {
                 <span>VS Endpoint: {project.vs_endpoint_name}</span>
               )}
             </div>
+            {mlflowUrl && (
+              <div className="mt-3">
+                <a
+                  href={mlflowUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-databricks-blue bg-blue-50 border border-blue-200 rounded-lg hover:bg-blue-100 transition-colors"
+                >
+                  <ExternalLink className="w-4 h-4" />
+                  MLflow Experiment{experimentName ? `: ${experimentName.split('/').pop()}` : ''}
+                </a>
+              </div>
+            )}
           </div>
 
           <div className="flex flex-col gap-2">
@@ -692,63 +709,28 @@ export default function ProjectDetails() {
         </Card>
       )}
 
-      {/* Studies Section */}
-      <Card className="mt-6">
-        <CardContent className="p-6">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-2">
-              <BookOpen className="w-5 h-5 text-databricks-blue" />
-              <h2 className="text-lg font-semibold text-databricks-gray-900">Studies</h2>
-            </div>
-            <Button variant="outline" size="sm" onClick={() => setShowNewStudy(!showNewStudy)}>
-              <Plus className="w-4 h-4 mr-1" /> New Study
-            </Button>
-          </div>
-
-          {showNewStudy && (
-            <div className="mb-4 p-4 bg-databricks-gray-50 rounded-md border border-databricks-gray-200 space-y-3">
-              <Input label="Study Name" value={newStudyName} onChange={(e) => setNewStudyName(e.target.value)} placeholder="e.g., initial_strategies" required />
-              <Input label="Description" value={newStudyDesc} onChange={(e) => setNewStudyDesc(e.target.value)} placeholder="Optional description" />
-              <div className="flex gap-2">
-                <Button variant="primary" size="sm" onClick={handleCreateStudy} disabled={!newStudyName}>Create</Button>
-                <Button variant="outline" size="sm" onClick={() => setShowNewStudy(false)}>Cancel</Button>
-              </div>
-            </div>
-          )}
-
-          {studies.length === 0 && !showNewStudy ? (
-            <p className="text-sm text-databricks-gray-500 text-center py-4">No studies yet. Create a study to group related builds and evaluations.</p>
-          ) : (
-            <div className="space-y-3">
-              {studies.map((study: any) => (
-                <div key={study.study_id} className="p-4 border border-databricks-gray-200 rounded-lg">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h4 className="font-medium text-databricks-gray-900">{study.study_name}</h4>
-                      {study.description && <p className="text-xs text-databricks-gray-600 mt-1">{study.description}</p>}
-                      <p className="text-xs text-databricks-gray-400 mt-1">Created: {new Date(study.created_at).toLocaleDateString()}</p>
-                    </div>
-                    <Button variant="ghost" size="sm" onClick={() => handleDeleteStudy(study.study_id)} className="text-databricks-error">
-                      <Trash2 className="w-4 h-4" />
-                    </Button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
       {/* Cleanup Confirmation Modal */}
       {showCleanupModal && cleanupPreview && (
         <Modal
           isOpen={showCleanupModal}
           onClose={() => setShowCleanupModal(false)}
           title="Confirm Resource Cleanup"
-          onConfirm={handleRunCleanup}
-          confirmText={isCleaningUp ? 'Cleaning up...' : `Delete ${cleanupPreview.count} resources`}
-          confirmVariant="danger"
-          isLoading={isCleaningUp}
+          footer={
+            <>
+              <Button variant="outline" onClick={() => setShowCleanupModal(false)} disabled={isCleaningUp}>
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                onClick={handleRunCleanup}
+                isLoading={isCleaningUp}
+                disabled={isCleaningUp}
+                className="bg-red-600 hover:bg-red-700 text-white"
+              >
+                {isCleaningUp ? 'Cleaning up...' : `Delete ${cleanupPreview.count} resources`}
+              </Button>
+            </>
+          }
         >
           <div className="space-y-4">
             <div className="p-4 bg-red-50 border border-red-200 rounded-md">

@@ -291,8 +291,24 @@ async def get_build_job_status(run_id: str, w=Depends(get_workspace_client), sql
             }
 
         # Get BUILD job status from Databricks (not evaluation job)
-        job_status = get_job_run_status(w, job_run_id)
-        job_url = get_job_url(w, job_run_id)
+        try:
+            job_status = get_job_run_status(w, job_run_id)
+        except Exception as e:
+            print(f"[ERROR] get_job_run_status failed for {job_run_id}: {e}")
+            return {
+                "run_id": run_id,
+                "state": run.get("state", "UNKNOWN"),
+                "job_url": None,
+                "status": None,
+                "start_time": None,
+                "error_message": f"Failed to fetch job status: {str(e)}",
+            }
+
+        job_url = None
+        try:
+            job_url = get_job_url(w, job_run_id)
+        except Exception as e:
+            print(f"[WARNING] get_job_url failed for {job_run_id}: {e}")
         
         # Update state in database if it changed
         current_state = run.get("state")

@@ -342,17 +342,36 @@ def update_build_state(
 
 
 def delete_build(run_id: str) -> bool:
-    """Delete a build and its associated evaluations. Returns True if deleted."""
+    """Delete a build, its evaluations, and related study/index associations."""
     connector = get_postgres_connector()
 
     build = get_build(run_id)
     if not build:
         return False
 
+    # Remove study_evaluations for all evaluations of this build
+    connector.execute(
+        """DELETE FROM study_evaluations WHERE eval_id IN (
+             SELECT eval_id FROM evaluations WHERE run_id = %s
+           )""",
+        (run_id,), fetch="none"
+    )
+    # Remove study_builds association
+    connector.execute(
+        "DELETE FROM study_builds WHERE build_run_id = %s",
+        (run_id,), fetch="none"
+    )
+    # Remove index_selections for this build
+    connector.execute(
+        "DELETE FROM index_selections WHERE build_run_id = %s",
+        (run_id,), fetch="none"
+    )
+    # Delete evaluations
     connector.execute(
         "DELETE FROM evaluations WHERE run_id = %s",
         (run_id,), fetch="none"
     )
+    # Delete the build itself
     connector.execute(
         "DELETE FROM builds WHERE run_id = %s",
         (run_id,), fetch="none"
@@ -361,9 +380,14 @@ def delete_build(run_id: str) -> bool:
 
 
 def delete_evaluation(eval_id: str) -> bool:
-    """Delete a single evaluation. Returns True if deleted."""
+    """Delete a single evaluation and its study association."""
     connector = get_postgres_connector()
 
+    # Remove study_evaluations association
+    connector.execute(
+        "DELETE FROM study_evaluations WHERE eval_id = %s",
+        (eval_id,), fetch="none"
+    )
     result = connector.execute(
         "DELETE FROM evaluations WHERE eval_id = %s RETURNING eval_id",
         (eval_id,), fetch="one"

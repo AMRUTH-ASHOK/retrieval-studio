@@ -194,9 +194,10 @@ class StructuredStrategy(ChunkingStrategy):
 class ParentChildStrategy(ChunkingStrategy):
     """Parent-child chunking strategy"""
     
-    def __init__(self, parent_size: int = 2048, child_size: int = 256):
+    def __init__(self, parent_size: int = 2048, child_size: int = 512, child_overlap: int = 50):
         self.parent_size = parent_size
         self.child_size = child_size
+        self.child_overlap = child_overlap
     
     def chunk(self, documents: List[Dict]) -> List[Chunk]:
         chunks = []
@@ -256,32 +257,41 @@ class ParentChildStrategy(ChunkingStrategy):
     
     def _create_child_chunks(self, parent_text: str, parent_id: str, 
                             doc_id: str, doc_name: str) -> List[Chunk]:
-        """Create child chunks from parent"""
+        """Create child chunks from parent, splitting on word boundaries with overlap"""
         children = []
         start = 0
         child_index = 0
+        text_len = len(parent_text)
         
-        while start < len(parent_text):
-            end = min(start + self.child_size, len(parent_text))
-            child_text = parent_text[start:end]
-            
-            child = Chunk(
-                chunk_id=str(uuid.uuid4()),
-                doc_id=doc_id,
-                doc_name=doc_name,
-                chunk_text=child_text,
-                chunk_index=child_index,
-                metadata={
-                    "strategy": "parent_child",
-                    "chunk_type": "child",
-                    "child_size": self.child_size,
-                },
-                parent_chunk_id=parent_id
-            )
-            children.append(child)
-            
-            start = end
-            child_index += 1
+        while start < text_len:
+            end = min(start + self.child_size, text_len)
+
+            # Avoid cutting mid-word: find the last space before `end`
+            if end < text_len:
+                last_space = parent_text.rfind(' ', start, end)
+                if last_space > start:
+                    end = last_space
+
+            child_text = parent_text[start:end].strip()
+
+            if child_text:
+                child = Chunk(
+                    chunk_id=str(uuid.uuid4()),
+                    doc_id=doc_id,
+                    doc_name=doc_name,
+                    chunk_text=child_text,
+                    chunk_index=child_index,
+                    metadata={
+                        "strategy": "parent_child",
+                        "chunk_type": "child",
+                        "child_size": self.child_size,
+                    },
+                    parent_chunk_id=parent_id
+                )
+                children.append(child)
+                child_index += 1
+
+            start = max(end - self.child_overlap, start + 1)
         
         return children
     
@@ -289,7 +299,8 @@ class ParentChildStrategy(ChunkingStrategy):
     def get_config_schema(cls) -> Dict:
         return {
             "parent_size": {"type": "int", "default": 2048, "min": 512, "max": 4096},
-            "child_size": {"type": "int", "default": 256, "min": 128, "max": 1024},
+            "child_size": {"type": "int", "default": 512, "min": 128, "max": 2048},
+            "child_overlap": {"type": "int", "default": 50, "min": 0, "max": 200},
         }
 
 class SemanticStrategy(ChunkingStrategy):

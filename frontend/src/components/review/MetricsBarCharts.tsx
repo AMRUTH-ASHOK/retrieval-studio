@@ -112,6 +112,7 @@ export default function MetricsBarCharts({
           },
           text: chartData.text,
           textposition: 'outside',
+          cliponaxis: false,
           textfont: { size: 11, color: '#374151' },
           hovertemplate: hoverTexts.map(t => t + '<extra></extra>'),
         }]}
@@ -133,8 +134,8 @@ export default function MetricsBarCharts({
             gridcolor: '#f3f4f6',
             zeroline: false,
           },
-          height: 320,
-          margin: { t: 60, b: chartData.x.length > 4 ? 100 : 60, l: 55, r: 15 },
+          height: 340,
+          margin: { t: 80, b: chartData.x.length > 4 ? 100 : 60, l: 55, r: 15 },
           showlegend: false,
           plot_bgcolor: 'white',
           paper_bgcolor: 'white',

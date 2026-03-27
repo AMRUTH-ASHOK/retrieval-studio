@@ -233,15 +233,18 @@ export default function Review() {
   }
 
   const loadQueryDetails = async (evalId: string) => {
+    console.log('[DEBUG Review] loadQueryDetails called with evalId:', evalId)
     setIsLoadingDetails(true)
     setError(null)
     try {
+      console.log('[DEBUG Review] Calling evaluationsApi.getResults:', evalId)
       const results = await evaluationsApi.getResults(evalId)
+      console.log('[DEBUG Review] getResults returned:', results?.length, 'rows', results)
 
       if (!results || results.length === 0) {
         setQueryDetails([])
         setSelectedDetailsEvalId(evalId)
-        setError('No query results found. The evaluation may still be running, or the results table may not have been created yet. Check the job status to ensure it completed successfully.')
+        setError(`No query results found for eval_id: ${evalId}. Check the service logs for detailed debug output.`)
         return
       }
 
@@ -333,15 +336,30 @@ export default function Review() {
   const [queryPage, setQueryPage] = useState(0)
   const [expandedQueries, setExpandedQueries] = useState<Set<number>>(new Set())
   const [expandedChunks, setExpandedChunks] = useState<Set<string>>(new Set())
+  const [strategyFilter, setStrategyFilter] = useState<string>('all')
   const QUERIES_PER_PAGE = 20
 
+  const distinctStrategies = useMemo(() => {
+    const strategies = new Set<string>()
+    queryDetails.forEach((row: any) => {
+      if (row.strategy) strategies.add(row.strategy)
+    })
+    return Array.from(strategies).sort()
+  }, [queryDetails])
+
   const filteredQueryDetails = useMemo(() => {
-    if (!querySearch.trim()) return queryDetails
-    const term = querySearch.toLowerCase()
-    return queryDetails.filter((row: any) =>
-      (row.query_text || '').toLowerCase().includes(term)
-    )
-  }, [queryDetails, querySearch])
+    let filtered = queryDetails
+    if (strategyFilter !== 'all') {
+      filtered = filtered.filter((row: any) => row.strategy === strategyFilter)
+    }
+    if (querySearch.trim()) {
+      const term = querySearch.toLowerCase()
+      filtered = filtered.filter((row: any) =>
+        (row.query_text || '').toLowerCase().includes(term)
+      )
+    }
+    return filtered
+  }, [queryDetails, querySearch, strategyFilter])
 
   const pagedQueryDetails = useMemo(() => {
     const start = queryPage * QUERIES_PER_PAGE
@@ -366,10 +384,16 @@ export default function Review() {
     })
   }
 
-  const renderChunkCard = (chunk: any, idx: number, label: string) => {
+  const renderChunkCard = (chunk: any, idx: number, label: string, isMatch?: boolean) => {
     if (typeof chunk === 'string') {
       return (
-        <div key={`${label}-${idx}`} className="p-2.5 bg-gray-50 rounded-lg border border-gray-200 text-xs font-mono text-gray-700">
+        <div key={`${label}-${idx}`} className={`p-2.5 rounded-lg border text-xs font-mono text-gray-700 ${
+          isMatch === true ? 'bg-green-50 border-green-300' : isMatch === false ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-200'
+        }`}>
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-[10px] font-semibold text-gray-500">#{idx + 1}</span>
+            {isMatch === true && <span className="text-[10px] text-green-600 font-medium">Match</span>}
+          </div>
           {chunk}
         </div>
       )
@@ -382,21 +406,30 @@ export default function Review() {
     const isExpanded = expandedChunks.has(expandKey)
     const needsTruncation = chunkText.length > 300
 
+    const borderClass = isMatch === true ? 'bg-green-50 border-green-300'
+      : isMatch === false ? 'bg-red-50/50 border-red-200'
+      : 'bg-gray-50 border-gray-200'
+
     return (
-      <div key={expandKey} className="p-3 bg-gray-50 rounded-lg border border-gray-200">
+      <div key={expandKey} className={`p-3 rounded-lg border ${borderClass}`}>
         <div className="flex items-start justify-between gap-2">
           <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] font-mono text-gray-400 truncate">{chunkId}</span>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[10px] font-semibold text-gray-500">#{idx + 1}</span>
+              <span className="text-[10px] font-mono bg-white px-1.5 py-0.5 rounded border border-gray-200 text-gray-600 max-w-[200px] truncate" title={chunkId}>
+                {chunkId}
+              </span>
               {score !== undefined && (
                 <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${
                   score >= 0.8 ? 'bg-green-100 text-green-700'
                   : score >= 0.5 ? 'bg-yellow-100 text-yellow-700'
                   : 'bg-red-100 text-red-700'
                 }`}>
-                  {typeof score === 'number' ? score.toFixed(3) : score}
+                  Score: {typeof score === 'number' ? score.toFixed(3) : score}
                 </span>
               )}
+              {isMatch === true && <span className="text-[10px] text-green-600 font-medium">Match</span>}
+              {isMatch === false && <span className="text-[10px] text-red-500 font-medium">No match</span>}
             </div>
           </div>
         </div>
@@ -780,6 +813,18 @@ export default function Review() {
                   {queryDetails.length > 0 && (
                     <>
                       <div className="flex flex-wrap items-center gap-3 mb-4">
+                        {distinctStrategies.length > 1 && (
+                          <select
+                            className="text-xs border border-gray-300 rounded-lg px-2.5 py-1.5 bg-white focus:outline-none focus:ring-1 focus:ring-databricks-blue"
+                            value={strategyFilter}
+                            onChange={(e) => { setStrategyFilter(e.target.value); setQueryPage(0) }}
+                          >
+                            <option value="all">All Strategies ({queryDetails.length})</option>
+                            {distinctStrategies.map(s => (
+                              <option key={s} value={s}>{s} ({queryDetails.filter((r: any) => r.strategy === s).length})</option>
+                            ))}
+                          </select>
+                        )}
                         <div className="relative flex-1 min-w-[200px] max-w-md">
                           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
                           <input
@@ -810,11 +855,23 @@ export default function Review() {
                                   {isOpen ? <ChevronUp className="w-4 h-4 text-gray-400" /> : <ChevronDown className="w-4 h-4 text-gray-400" />}
                                 </div>
                                 <div className="flex-1 min-w-0">
-                                  <p className="text-sm font-medium text-gray-900 leading-snug">
-                                    {row.query_text || 'Query'}
-                                  </p>
+                                  <div className="flex items-center gap-2 mb-0.5">
+                                    <p className="text-sm font-medium text-gray-900 leading-snug flex-1">
+                                      {row.query_text || 'Query'}
+                                    </p>
+                                    {row.strategy && (
+                                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-medium whitespace-nowrap">
+                                        {row.strategy}
+                                      </span>
+                                    )}
+                                    {row.query_type && (
+                                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 font-mono whitespace-nowrap">
+                                        {row.query_type}
+                                      </span>
+                                    )}
+                                  </div>
                                   {metrics && (
-                                    <div className="flex flex-wrap gap-2 mt-1.5">
+                                    <div className="flex flex-wrap gap-2 mt-1">
                                       {metrics.recall_at_10 !== undefined && (
                                         <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
                                           metrics.recall_at_10 >= 0.8 ? 'bg-green-100 text-green-700'
@@ -834,33 +891,131 @@ export default function Review() {
                                           P@10: {metrics.precision_at_10.toFixed(2)}
                                         </span>
                                       )}
+                                      {metrics.avg_latency_ms !== undefined && (
+                                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 font-medium">
+                                          {metrics.avg_latency_ms.toFixed(0)}ms
+                                        </span>
+                                      )}
                                     </div>
                                   )}
                                 </div>
                               </button>
 
-                              {isOpen && (
-                                <div className="border-t border-gray-100 p-4 bg-gray-50/50">
-                                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                                    <div>
-                                      <h4 className="text-xs font-semibold text-gray-700 mb-2 flex items-center gap-1.5">
-                                        <span className="w-2 h-2 rounded-full bg-blue-500"></span>
-                                        Expected Chunks
-                                        {row.expected_chunks_parsed && <span className="text-gray-400 font-normal">({row.expected_chunks_parsed.length})</span>}
-                                      </h4>
-                                      {renderChunks(row.expected_chunks_parsed, `expected-${globalIdx}`)}
-                                    </div>
-                                    <div>
-                                      <h4 className="text-xs font-semibold text-gray-700 mb-2 flex items-center gap-1.5">
-                                        <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-                                        Retrieved Chunks
-                                        {row.retrieved_chunks_parsed && <span className="text-gray-400 font-normal">({row.retrieved_chunks_parsed.length})</span>}
-                                      </h4>
-                                      {renderChunks(row.retrieved_chunks_parsed, `retrieved-${globalIdx}`)}
+                              {isOpen && (() => {
+                                const expectedChunks = row.expected_chunks_parsed || []
+                                const retrievedChunks = row.retrieved_chunks_parsed || []
+
+                                const getChunkText = (c: any) => typeof c === 'string' ? c : (c?.chunk_text || c?.text || '')
+
+                                const expectedTextsSet = new Set(expectedChunks.map((c: any) => getChunkText(c).toLowerCase().trim()).filter(Boolean))
+                                const retrievedTextsSet = new Set(retrievedChunks.map((c: any) => getChunkText(c).toLowerCase().trim()).filter(Boolean))
+
+                                const isRetrievedMatch = (chunk: any) => {
+                                  const text = getChunkText(chunk).toLowerCase().trim()
+                                  if (!text || expectedTextsSet.size === 0) return undefined
+                                  for (const exp of expectedTextsSet) {
+                                    if (text.includes(exp) || exp.includes(text)) return true
+                                  }
+                                  return false
+                                }
+
+                                const matchCount = retrievedChunks.filter((c: any) => isRetrievedMatch(c) === true).length
+                                const expectedCount = expectedChunks.length
+                                const retrievedCount = retrievedChunks.length
+
+                                return (
+                                  <div className="border-t border-gray-100 p-4 bg-gray-50/50">
+                                    {/* Metric Breakdown */}
+                                    {metrics && (
+                                      <div className="mb-4 p-3 bg-white rounded-lg border border-gray-200">
+                                        <h4 className="text-xs font-semibold text-gray-700 mb-2">Metric Breakdown</h4>
+                                        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                                          {metrics.recall_at_10 !== undefined && (
+                                            <div className="text-center p-2 rounded-lg bg-gray-50">
+                                              <div className={`text-lg font-bold ${
+                                                metrics.recall_at_10 >= 0.8 ? 'text-green-600' : metrics.recall_at_10 >= 0.5 ? 'text-yellow-600' : 'text-red-600'
+                                              }`}>{(metrics.recall_at_10 * 100).toFixed(0)}%</div>
+                                              <div className="text-[10px] text-gray-500 font-medium">Recall@10</div>
+                                              <div className="text-[10px] text-gray-400 mt-0.5">
+                                                {matchCount} of {expectedCount} expected found in top {retrievedCount}
+                                              </div>
+                                            </div>
+                                          )}
+                                          {metrics.precision_at_10 !== undefined && (
+                                            <div className="text-center p-2 rounded-lg bg-gray-50">
+                                              <div className={`text-lg font-bold ${
+                                                metrics.precision_at_10 >= 0.8 ? 'text-green-600' : metrics.precision_at_10 >= 0.5 ? 'text-yellow-600' : 'text-red-600'
+                                              }`}>{(metrics.precision_at_10 * 100).toFixed(0)}%</div>
+                                              <div className="text-[10px] text-gray-500 font-medium">Precision@10</div>
+                                              <div className="text-[10px] text-gray-400 mt-0.5">
+                                                {matchCount} of {retrievedCount} retrieved are relevant
+                                              </div>
+                                            </div>
+                                          )}
+                                          {metrics.ndcg_at_10 !== undefined && (
+                                            <div className="text-center p-2 rounded-lg bg-gray-50">
+                                              <div className={`text-lg font-bold ${
+                                                metrics.ndcg_at_10 >= 0.8 ? 'text-green-600' : metrics.ndcg_at_10 >= 0.5 ? 'text-yellow-600' : 'text-red-600'
+                                              }`}>{(metrics.ndcg_at_10 * 100).toFixed(0)}%</div>
+                                              <div className="text-[10px] text-gray-500 font-medium">NDCG@10</div>
+                                              <div className="text-[10px] text-gray-400 mt-0.5">
+                                                Ranking quality (higher = relevant results ranked first)
+                                              </div>
+                                            </div>
+                                          )}
+                                          {metrics.avg_latency_ms !== undefined && (
+                                            <div className="text-center p-2 rounded-lg bg-gray-50">
+                                              <div className={`text-lg font-bold ${
+                                                metrics.avg_latency_ms < 200 ? 'text-green-600' : metrics.avg_latency_ms < 500 ? 'text-yellow-600' : 'text-red-600'
+                                              }`}>{metrics.avg_latency_ms.toFixed(0)}ms</div>
+                                              <div className="text-[10px] text-gray-500 font-medium">Latency</div>
+                                              <div className="text-[10px] text-gray-400 mt-0.5">
+                                                Query execution time
+                                              </div>
+                                            </div>
+                                          )}
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {/* Chunks side by side */}
+                                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                      <div>
+                                        <h4 className="text-xs font-semibold text-gray-700 mb-2 flex items-center gap-1.5">
+                                          <span className="w-2 h-2 rounded-full bg-blue-500"></span>
+                                          Expected Chunks
+                                          {expectedChunks.length > 0 && <span className="text-gray-400 font-normal">({expectedChunks.length})</span>}
+                                        </h4>
+                                        {(!expectedChunks || expectedChunks.length === 0) ? (
+                                          <p className="text-xs text-gray-400 italic">No expected chunks (auto-generated queries)</p>
+                                        ) : (
+                                          <div className="space-y-2">
+                                            {expectedChunks.map((chunk: any, idx: number) => renderChunkCard(chunk, idx, `expected-${globalIdx}`))}
+                                          </div>
+                                        )}
+                                      </div>
+                                      <div>
+                                        <h4 className="text-xs font-semibold text-gray-700 mb-2 flex items-center gap-1.5">
+                                          <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+                                          Retrieved Chunks
+                                          {retrievedChunks.length > 0 && (
+                                            <span className="text-gray-400 font-normal">
+                                              ({retrievedChunks.length}{matchCount > 0 && `, ${matchCount} matched`})
+                                            </span>
+                                          )}
+                                        </h4>
+                                        {(!retrievedChunks || retrievedChunks.length === 0) ? (
+                                          <p className="text-xs text-gray-400 italic">No retrieved chunks</p>
+                                        ) : (
+                                          <div className="space-y-2">
+                                            {retrievedChunks.map((chunk: any, idx: number) => renderChunkCard(chunk, idx, `retrieved-${globalIdx}`, isRetrievedMatch(chunk)))}
+                                          </div>
+                                        )}
+                                      </div>
                                     </div>
                                   </div>
-                                </div>
-                              )}
+                                )
+                              })()}
                             </div>
                           )
                         })}

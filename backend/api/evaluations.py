@@ -47,8 +47,11 @@ async def create_evaluation(
             if not eval_request.golden_dataset_table:
                 raise HTTPException(status_code=400, detail="golden_dataset_table is required when use_golden_dataset is true")
         elif auto_generate:
+            # Auto-generate golden table name if not provided
             if generate_golden and not eval_request.golden_dataset_table:
-                raise HTTPException(status_code=400, detail="golden_dataset_table is required when auto_generate_queries is true")
+                from retrieval_core.configs import config as core_config
+                eval_request.golden_dataset_table = core_config.golden_dataset_table(project_name)
+                print(f"[INFO] Auto-generated golden_dataset_table: {eval_request.golden_dataset_table}")
             if not eval_request.corpus_table:
                 try:
                     from backend.utils.build_results import construct_build_results, extract_corpus_tables, extract_corpus_table
@@ -250,42 +253,69 @@ async def get_evaluation_results(run_id: str, sql_connector=Depends(get_sql_conn
     try:
         from utils.query_builder import escape_identifier, sanitize_string
 
-        # Query evaluation results using parameterized query
-        # Check against build_run_id (parent), eval_id, eval_run_id (eval parent/child), or build_child_run_id (strategy)
         run_id_safe = sanitize_string(run_id)
 
-        # First check if the table exists
-        table_name = f"{escape_identifier(settings.CATALOG)}.raw.rs_eval_results"
+        print(f"\n[DEBUG EVAL-RESULTS] ========== START ==========")
+        print(f"[DEBUG EVAL-RESULTS] Requested run_id: {repr(run_id)}")
+        print(f"[DEBUG EVAL-RESULTS] Sanitized run_id: {repr(run_id_safe)}")
+        print(f"[DEBUG EVAL-RESULTS] settings.CATALOG: {repr(settings.CATALOG)}")
+
+        table_name = f"{escape_identifier(settings.CATALOG)}.{escape_identifier(settings.SCHEMA)}.rs_eval_results"
+        print(f"[DEBUG EVAL-RESULTS] Table name: {table_name}")
+
+        # Check if table exists
         try:
-            # Try to select from the table to see if it exists
             check_query = f"SELECT 1 FROM {table_name} LIMIT 1"
-            sql_connector.execute(check_query)
+            print(f"[DEBUG EVAL-RESULTS] Checking table existence: {check_query}")
+            check_result = sql_connector.execute(check_query)
+            print(f"[DEBUG EVAL-RESULTS] Table exists, check returned: {check_result}")
         except Exception as table_check_error:
-            # Table likely doesn't exist
             error_str = str(table_check_error).lower()
+            print(f"[DEBUG EVAL-RESULTS] Table check error: {table_check_error}")
             if "table_or_view_not_found" in error_str or "table not found" in error_str or "does not exist" in error_str:
-                # Return empty results instead of 500 error
-                print(f"Table {table_name} does not exist yet. Returning empty results.")
+                print(f"[DEBUG EVAL-RESULTS] Table does NOT exist. Returning [].")
                 return []
-            # Re-raise if it's a different error
             raise
 
+        # First: show what IDs exist in the table
+        try:
+            sample_query = f"SELECT DISTINCT eval_id, build_run_id FROM {table_name} LIMIT 20"
+            print(f"[DEBUG EVAL-RESULTS] Sampling distinct IDs from table...")
+            sample = sql_connector.execute(sample_query)
+            print(f"[DEBUG EVAL-RESULTS] Distinct IDs in table ({len(sample)} rows):")
+            for row in sample:
+                print(f"[DEBUG EVAL-RESULTS]   eval_id={row.get('eval_id')}, build_run_id={row.get('build_run_id')}")
+        except Exception as sample_err:
+            print(f"[DEBUG EVAL-RESULTS] Failed to sample IDs: {sample_err}")
+
+        # Now run the actual query
         query = f"""
             SELECT * FROM {table_name}
-            WHERE build_run_id = ?
-               OR eval_id = ?
-               OR eval_run_id = ?
-               OR build_child_run_id = ?
+            WHERE build_run_id = '{run_id_safe}'
+               OR eval_id = '{run_id_safe}'
+               OR eval_run_id = '{run_id_safe}'
+               OR build_child_run_id = '{run_id_safe}'
             ORDER BY created_at DESC
         """
 
-        # Pass run_id 4 times for the 4 placeholders
-        results = sql_connector.execute(query, [run_id_safe, run_id_safe, run_id_safe, run_id_safe])
+        print(f"[DEBUG EVAL-RESULTS] Running query:")
+        print(f"[DEBUG EVAL-RESULTS]   {query.strip()}")
+        results = sql_connector.execute(query)
+        print(f"[DEBUG EVAL-RESULTS] Query returned {len(results) if results else 0} rows")
+
+        if results and len(results) > 0:
+            print(f"[DEBUG EVAL-RESULTS] First row keys: {list(results[0].keys())}")
+            print(f"[DEBUG EVAL-RESULTS] First row eval_id: {results[0].get('eval_id')}")
+            print(f"[DEBUG EVAL-RESULTS] First row build_run_id: {results[0].get('build_run_id')}")
+        else:
+            print(f"[DEBUG EVAL-RESULTS] NO ROWS MATCHED. The run_id '{run_id_safe}' was not found in any column.")
+            print(f"[DEBUG EVAL-RESULTS] This means the eval_id passed by the frontend does not match any eval_id/build_run_id/eval_run_id/build_child_run_id in the table.")
+
+        print(f"[DEBUG EVAL-RESULTS] ========== END ==========\n")
         return results if results else []
 
     except Exception as e:
-        # Log the full error for debugging
-        print(f"Error in get_evaluation_results: {str(e)}")
+        print(f"[ERROR EVAL-RESULTS] Exception: {type(e).__name__}: {str(e)}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to retrieve evaluation results: {str(e)}")

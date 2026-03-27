@@ -403,7 +403,14 @@ if generate_golden_dataset:
 
     if golden_rows:
         gdf = spark.createDataFrame(golden_rows, schema=golden_schema).withColumn("created_at", current_timestamp())
-        gdf.write.format("delta").mode("append").saveAsTable(golden_dataset_table)
+        if spark.catalog.tableExists(golden_dataset_table):
+            try:
+                spark.sql(f"DELETE FROM {golden_dataset_table} WHERE golden_dataset_id = '{golden_dataset_id}'")
+            except Exception:
+                pass
+            gdf.write.format("delta").mode("append").saveAsTable(golden_dataset_table)
+        else:
+            gdf.write.format("delta").mode("overwrite").saveAsTable(golden_dataset_table)
         print(f"Saved golden dataset to {golden_dataset_table} (id={golden_dataset_id}) with {len(golden_rows)} rows")
 
         query_rows = gdf.select("query_text", "expected_chunks").collect()
@@ -428,31 +435,14 @@ USING DELTA
 """)
 
 # Add new columns if they don't exist (for backwards compatibility)
-try:
-    spark.sql(f"ALTER TABLE {eval_results_table} ADD COLUMNS (eval_id STRING)")
-    print(f"Added eval_id column to {eval_results_table}")
-except Exception as e:
-    error_str = str(e).lower()
-    if ("already exists" in error_str or 
-        "cannot resolve" in error_str or 
-        "field_already_exists" in error_str or
-        "42710" in str(e)):
-        print(f"eval_id column already exists in {eval_results_table} - skipping")
-    else:
-        print(f"Note: Could not add eval_id column (may already exist): {e}")
-
-try:
-    spark.sql(f"ALTER TABLE {eval_results_table} ADD COLUMNS (expected_chunks STRING, retrieved_chunks STRING)")
-    print(f"Added expected_chunks and retrieved_chunks columns to {eval_results_table}")
-except Exception as e:
-    error_str = str(e).lower()
-    if ("already exists" in error_str or 
-        "cannot resolve" in error_str or 
-        "field_already_exists" in error_str or
-        "42710" in str(e)):  # SQLSTATE 42710 = duplicate column
-        print(f"Columns already exist in {eval_results_table} - skipping")
-    else:
-        print(f"Note: Could not add columns (may already exist): {e}")
+existing_eval_cols = [c.name.lower() for c in spark.table(eval_results_table).schema]
+for col_name, col_type in [("eval_id", "STRING"), ("expected_chunks", "STRING"), ("retrieved_chunks", "STRING")]:
+    if col_name not in existing_eval_cols:
+        try:
+            spark.sql(f"ALTER TABLE {eval_results_table} ADD COLUMNS ({col_name} {col_type})")
+            print(f"Added {col_name} column to {eval_results_table}")
+        except Exception as e:
+            print(f"[WARNING] Could not add {col_name}: {e}")
 
 # COMMAND ----------
 # MAGIC %md
@@ -552,29 +542,42 @@ with start_eval_parent_run(run_name=f"eval_{build_run_id[:8]}", parent_run_id=bu
                             except json.JSONDecodeError:
                                 expected_texts = [expected_raw]
 
+                        # Build expected_chunks_full (with IDs) and expected_texts (text-only for metric computation)
+                        expected_chunks_full = []
+
                         if isinstance(expected_raw, (list, tuple)):
                             if expected_raw and isinstance(expected_raw[0], dict):
-                                expected_texts = [
-                                    str(e.get("chunk_text") or e.get("text") or "")
-                                    for e in expected_raw
-                                    if isinstance(e, dict) and (e.get("chunk_text") or e.get("text"))
-                                ]
+                                for e in expected_raw:
+                                    if isinstance(e, dict):
+                                        text = str(e.get("chunk_text") or e.get("text") or "")
+                                        cid = e.get("chunk_id") or e.get("id") or ""
+                                        if text:
+                                            expected_texts.append(text)
+                                            expected_chunks_full.append({"chunk_id": cid, "chunk_text": text})
                             else:
                                 expected_texts = [str(e) for e in expected_raw if e]
+                                expected_chunks_full = [{"chunk_id": "", "chunk_text": t} for t in expected_texts]
                         elif isinstance(expected_raw, dict):
                             if "expected_chunks" in expected_raw:
                                 nested = expected_raw.get("expected_chunks")
                                 if isinstance(nested, (list, tuple)):
                                     if nested and isinstance(nested[0], dict):
-                                        expected_texts = [
-                                            str(e.get("chunk_text") or e.get("text") or "")
-                                            for e in nested
-                                            if isinstance(e, dict) and (e.get("chunk_text") or e.get("text"))
-                                        ]
+                                        for e in nested:
+                                            if isinstance(e, dict):
+                                                text = str(e.get("chunk_text") or e.get("text") or "")
+                                                cid = e.get("chunk_id") or e.get("id") or ""
+                                                if text:
+                                                    expected_texts.append(text)
+                                                    expected_chunks_full.append({"chunk_id": cid, "chunk_text": text})
                                     else:
                                         expected_texts = [str(e) for e in nested if e]
+                                        expected_chunks_full = [{"chunk_id": "", "chunk_text": t} for t in expected_texts]
                                 elif isinstance(nested, str):
                                     expected_texts = [nested]
+                                    expected_chunks_full = [{"chunk_id": "", "chunk_text": nested}]
+                        
+                        if not expected_chunks_full and expected_texts:
+                            expected_chunks_full = [{"chunk_id": "", "chunk_text": t} for t in expected_texts]
                     
                     # Debug first query
                     if i == 0:
@@ -652,7 +655,7 @@ with start_eval_parent_run(run_name=f"eval_{build_run_id[:8]}", parent_run_id=bu
                         "strategy": strategy_name,
                         "query_type": query_type,
                         "query_text": qtext,
-                        "expected_chunks": json.dumps(expected_texts) if expected_texts else None,
+                        "expected_chunks": json.dumps(expected_chunks_full) if expected_chunks_full else (json.dumps(expected_texts) if expected_texts else None),
                         "retrieved_chunks": json.dumps(retrieved),
                         "metrics": json.dumps(metrics),
                     })
@@ -780,8 +783,19 @@ if all_rows:
     ])
 
     df = spark.createDataFrame(all_rows, schema=schema).withColumn("created_at", current_timestamp())
-    df.write.format("delta").mode("append").saveAsTable(eval_results_table)
-    print(f"Saved {len(all_rows)} result rows to {eval_results_table}")
+
+    if spark.catalog.tableExists(eval_results_table):
+        # Append new results; delete any stale rows from a previous run of the same eval_id
+        try:
+            spark.sql(f"DELETE FROM {eval_results_table} WHERE eval_id = '{eval_id}'")
+            print(f"Cleared previous results for eval_id={eval_id}")
+        except Exception as del_err:
+            print(f"[WARNING] Could not clear old results: {del_err}")
+        df.write.format("delta").mode("append").saveAsTable(eval_results_table)
+    else:
+        df.write.format("delta").mode("overwrite").saveAsTable(eval_results_table)
+
+    print(f"Saved {len(all_rows)} result rows to {eval_results_table} (eval_id={eval_id})")
 
 # COMMAND ----------
 # MAGIC %md

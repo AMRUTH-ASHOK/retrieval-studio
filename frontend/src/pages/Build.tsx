@@ -88,7 +88,11 @@ export default function Build() {
       } else if (status.state === 'FAILED' || status.state === 'PARTIAL_SUCCESS') {
         if (pollingIntervalRef.current) { clearInterval(pollingIntervalRef.current); pollingIntervalRef.current = null }
       }
-    } catch (e) { console.error('Failed to poll:', e) }
+    } catch (e: any) {
+      console.error('Failed to poll:', e)
+      const detail = e?.response?.data?.detail || e?.message || 'Unknown error'
+      setError(`Status polling failed: ${detail}`)
+    }
   }
 
   const addDataSource = () => {
@@ -120,7 +124,11 @@ export default function Build() {
   const addFiles = (sourceId: string, fileList: FileList | null) => {
     if (!fileList) return
     const newFiles: UploadedFileState[] = Array.from(fileList).map(f => ({ file: f, status: 'pending' as const }))
-    setDataSources(prev => prev.map(s => s.id === sourceId ? { ...s, files: [...s.files, ...newFiles], uploadedVolumePath: null } : s))
+    setDataSources(prev => prev.map(s => s.id === sourceId ? {
+      ...s,
+      files: [...s.files.map(f => ({ ...f, status: 'pending' as const })), ...newFiles],
+      uploadedVolumePath: null
+    } : s))
   }
 
   const removeFile = (sourceId: string, fileIndex: number) => {
@@ -164,6 +172,11 @@ export default function Build() {
       return ''
     }
     return ''
+  }
+
+  const canProceedFromStep = (step: number): boolean => {
+    const err = getStepError(step)
+    return !err || err.startsWith('Warning:')
   }
 
   const handleNext = () => {

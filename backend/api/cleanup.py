@@ -69,6 +69,19 @@ async def preview_cleanup(project_id: str, sql_connector=Depends(get_sql_connect
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/job/{job_run_id}/status")
+async def get_cleanup_job_status(job_run_id: int, w=Depends(get_workspace_client)):
+    """Get cleanup job status by Databricks job_run_id"""
+    try:
+        status = get_job_run_status(w, job_run_id)
+        mapped = status.get("result_state") or status.get("state")
+        state_map = {"SUCCESS": "SUCCESS", "FAILED": "FAILED", "CANCELED": "FAILED",
+                     "TIMEDOUT": "FAILED", "RUNNING": "RUNNING", "PENDING": "PENDING", "TERMINATED": "SUCCESS"}
+        return {"state": state_map.get(mapped, mapped), "status": status}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/projects/{project_id}/cleanup")
 async def run_cleanup(project_id: str, w=Depends(get_workspace_client), sql_connector=Depends(get_sql_connector)):
     """Submit cleanup notebook job to delete discarded resources"""

@@ -6,11 +6,13 @@ A comprehensive Databricks application for systematically evaluating and optimiz
 
 Retrieval Studio provides a complete **inner loop** for improving retrieval quality in RAG systems. Instead of guessing which chunking strategy works best, you can:
 
-- 📊 **Experiment** with different document chunking strategies (baseline, semantic, structured, parent-child)
-- 🤖 **Auto-generate** synthetic evaluation queries from your documents
-- 📈 **Measure** retrieval quality with industry-standard metrics (Recall@K, NDCG@K, Precision@K)
-- 🏆 **Compare** strategies side-by-side and optimize for your specific use case
-- 🔍 **Track** all experiments in MLflow with full reproducibility
+- **Per-source strategy assignment** - Apply different chunking strategies to different data sources (e.g., "structured" for PDFs, "semantic" for text files)
+- **Multiple data sources per build** - Combine UC Volumes, PDFs, text files, Delta tables, and Word documents in a single build
+- **Auto-generate** synthetic evaluation queries from all your document chunks
+- **Measure** retrieval quality with industry-standard metrics (Recall@K, NDCG@K, Precision@K)
+- **Per-source comparison** - See which strategy works best for each data source, with LLM-generated explanations
+- **Resource management** - Select which VS indexes to keep and clean up the rest
+- **Track** all experiments in MLflow with full reproducibility
 
 ---
 
@@ -29,7 +31,8 @@ Run the schema creation script in your Lakebase SQL Editor:
 
 ```sql
 -- Copy and run contents of database/postgres_schema.sql
--- This creates: projects, builds, evaluations, job_runs tables
+-- This creates: projects, builds, evaluations, job_runs,
+--   index_selections, studies, study_builds, study_evaluations tables
 ```
 
 ### 2. Configure Environment Variables
@@ -42,8 +45,8 @@ DATABRICKS_HOST=https://your-workspace.cloud.databricks.com
 DATABRICKS_TOKEN=dapi...
 
 # Unity Catalog
-CATALOG=retrievalstudio
-SCHEMA=raw
+UC_CATALOG=retrievalstudio
+RAW_SCHEMA=raw
 
 # Notebook Paths
 BUILD_NOTEBOOK_PATH=/Workspace/Users/your-email/retrieval-studio/notebooks/build_notebook_v2
@@ -60,15 +63,19 @@ POSTGRES_PASSWORD=your_password
 ### 3. Upload Notebooks to Databricks
 
 Upload these notebooks to your Databricks workspace:
-- `notebooks/build_notebook_v2.py` → Build pipeline
-- `notebooks/eval_notebook.py` → Evaluation pipeline
+- `notebooks/build_notebook_v2.py` - Build pipeline
+- `notebooks/eval_notebook.py` - Evaluation pipeline
+- `notebooks/cleanup_notebook.py` - Resource cleanup pipeline
 
 ### 4. Deploy the Application
 
 **Option A: Deploy to Databricks Apps (Recommended)**
 ```bash
-# Deploy both frontend and backend to Databricks Apps
-databricks apps deploy
+# 1. Build the frontend
+cd frontend && npm run build && cd ..
+
+# 2. Upload all files to your Databricks workspace folder
+# 3. Go to Compute > Apps > your app > Deploy > select workspace folder > Deploy
 ```
 
 **Option B: Run Locally for Development**
@@ -105,83 +112,51 @@ Your project is now ready for builds!
 
 ---
 
-### Step 2: Build Your Index
+### Step 2: Build Your Indexes
 
-The **Build** page is where you prepare your data and create searchable indexes.
+The **Build** page uses a 4-step wizard to configure and submit build jobs.
 
-#### Choose Your Data Source
+#### Step 2a: Add Data Sources
+
+Add one or more named data sources. Each source has its own type and configuration.
 
 **Supported Data Types:**
-- 📝 **Text** - Paste text directly (supports multiple entries)
-- 📊 **Delta Table** - Query existing Delta tables
-- 📄 **CSV** - Upload CSV files
-- 📋 **JSON** - Upload JSON files
-- 📕 **PDF** - Upload PDF documents (text extraction via PyMuPDF)
-- 🗄️ **UC Volume** - Read files from Unity Catalog Volumes
+- **UC Volume** - Read files from Unity Catalog Volumes (supports txt, pdf, docx, csv, json)
+- **Delta Table** - Query existing Delta tables
+- **CSV** - Upload CSV files
+- **JSON** - Upload JSON files
+- **PDF** - Upload PDF documents (text extraction via PyMuPDF)
+- **DOCX** - Upload Word documents (text extraction via python-docx)
 
-#### Configure Data Source
+**Example:** Add a source named "clinical_docs" with type "uc_volume" pointing to `/Volumes/catalog/schema/my_volume`
 
-**Example: Delta Table**
-```
-Table Name: main.prod.customer_docs
-Text Column: content
-ID Column: doc_id (optional)
-Max Rows: 2000
-```
+#### Step 2b: Assign Strategies Per Source
 
-**Example: Multiple Text Entries**
-```
-Entry 1:
-  Document Name: "Product Overview"
-  Text Content: "Our platform provides..."
+For each data source, independently select which chunking strategies to apply:
 
-Entry 2:
-  Document Name: "Getting Started Guide"
-  Text Content: "To begin using..."
-```
+- **Baseline** - Fixed-size chunks with overlap (chunk_size: 512, overlap: 50)
+- **Semantic** - Sentence-boundary aware chunking
+- **Structured** - Section-aware chunking preserving document hierarchy
+- **Parent-Child** - Two-level hierarchy with parent context (parent: 2048, child: 512, overlap: 50)
+- **Sentence** - Split on sentence boundaries
+- **Paragraph** - Split on paragraph boundaries
 
-#### Select Chunking Strategies
+Each source-strategy combination creates a **separate Delta table** and **Vector Search index**.
 
-Choose one or more strategies to compare:
+#### Step 2c: Configure Endpoints
 
-**🔹 Baseline** - Fixed-size chunks with overlap
-- Best for: General-purpose retrieval
-- Parameters:
-  - `chunk_size`: Characters per chunk (default: 512)
-  - `overlap`: Character overlap between chunks (default: 50)
+Set the shared embedding model endpoint and Vector Search endpoint.
 
-**🔹 Semantic** - Sentence-boundary aware chunking
-- Best for: Preserving meaning and context
-- Parameters:
-  - `window_size`: Sentences per chunk (default: 3)
-  - `min_chunk_size`: Minimum characters (default: 256)
+#### Step 2d: Review & Submit
 
-**🔹 Structured** - Section-aware chunking
-- Best for: Documents with clear structure (headings, sections)
-- Parameters:
-  - `preserve_hierarchy`: Keep document structure (default: true)
-  - `max_chunk_size`: Maximum chunk size (default: 1024)
-
-**🔹 Parent-Child** - Two-level hierarchy
-- Best for: Large documents requiring context
-- Parameters:
-  - `parent_chunk_size`: Size of parent chunks (default: 2048)
-  - `child_chunk_size`: Size of child chunks (default: 512)
-  - `overlap`: Overlap between chunks (default: 50)
-
-#### Submit Build
-
-1. Review your configuration
-2. Click **"Submit Build"**
-3. Monitor progress in real-time
-4. Job URL links to Databricks job run
+Review the source-strategy matrix showing all combinations that will be built, including predicted table names like `{catalog}.chunks.rs_chunks_{project}_{source}_{strategy}`.
 
 **What happens during a build:**
-- Documents are loaded and preprocessed
-- Each selected strategy chunks the documents
-- Chunks are written to Delta tables (`{catalog}.chunks.rs_chunks_{project}_{strategy}`)
-- Vector Search indexes are created/updated automatically
-- Results are stored in PostgreSQL with experiment_id for MLflow tracking
+- For each source, documents are loaded (from UC Volume, uploaded files, or Delta table)
+- For each strategy assigned to that source, documents are chunked independently
+- Each source-strategy combo gets its own Delta table and VS index
+- MLflow child runs are tagged with `source_name` and `strategy_name`
+- Build status reflects the notebook's actual result (SUCCESS/PARTIAL_SUCCESS/FAILED)
 
 ---
 
@@ -191,44 +166,35 @@ The **Evaluate** page runs systematic tests on your built indexes.
 
 #### Select a Build
 
-Choose a completed build from the dropdown. You'll see all strategies that were indexed.
+Choose a completed build (auto-selected when navigating from Project Details via "Evaluate This Build").
 
 #### Configure Evaluation
 
 **Evaluation Dataset Options:**
 
 **Option A: Auto-Generate Queries (Recommended)**
-- ✅ No manual query creation needed
-- System generates synthetic queries from your documents
+- No manual query creation needed
+- System generates synthetic queries by sampling from ALL source-specific chunk tables
 - Parameters:
   - `Number of Queries`: How many to generate (e.g., 50)
-  - `Query Style`: `specific`, `broad`, or `contextual`
+  - `Query Style`: `keyword`, `specific`, `broad`, or `contextual`
   - `Compare Query Types`: Test FULL_TEXT, ANN, and HYBRID search
 
-**Option B: Use Existing Queries**
-- Provide a Delta table with pre-written queries
-- Required columns:
-  - `query_id`: Unique identifier
-  - `query_text`: The query string
-  - `doc_id`: (Optional) Ground truth document ID
+**Option B: Use Existing Golden Dataset (Delta Table)**
+- Provide a Delta table with pre-written queries and expected chunks
+- Required columns: `query_text`, `expected_chunks`
 
 **Evaluation Settings:**
 - `Top-K`: How many results to retrieve (default: 10)
-- `Judge Model`: LLM endpoint for relevance scoring (if no ground truth)
+- `Judge Model`: LLM endpoint for relevance scoring
 
-#### Submit Evaluation
-
-1. Click **"Submit Evaluation"**
-2. Monitor job progress
-3. Results logged to MLflow automatically
-
-**What happens during evaluation:**
-- Queries are generated or loaded
-- Each query is run against all strategies
-- Top-K results are retrieved from Vector Search
-- Metrics are calculated (Recall@K, NDCG@K, Precision@K)
-- LLM judge scores relevance if no ground truth available
-- All metrics logged to MLflow with tags (`rs_role=eval_strategy`)
+#### What happens during evaluation:
+- Queries are generated or loaded from the golden dataset
+- Each query is run against ALL strategy indexes from the build
+- Top-K results are retrieved from each Vector Search index
+- Metrics are calculated per query per strategy (Recall@K, NDCG@K, Precision@K, Latency)
+- MLflow child runs are tagged with `source_name`, `strategy_name`, and `eval_id`
+- Results are stored in `{catalog}.{schema}.rs_eval_results` (append mode, keyed by `eval_id`)
 
 ---
 
@@ -244,43 +210,68 @@ The **Review** page provides comprehensive analysis and comparison.
 
 #### View Results
 
-**🏆 Best Performers**
+**Best Performers**
 - **Best Build**: Highest average recall across all strategies
 - **Best Strategy**: Top-performing chunking approach
 - **Fastest**: Lowest average query latency
 - **Best Overall**: Balanced score across metrics
 
-**📊 Metrics Bar Charts**
+**Per-Source Comparison**
+- Results grouped by data source
+- Strategies compared side-by-side within each source
+- Best strategy highlighted with LLM-generated explanation ("Why is X best?")
+- Index keep/discard toggle per strategy
+
+**Metrics Bar Charts**
 - **By Build**: Compare builds across all metrics
 - **By Strategy**: Compare chunking strategies
 - **By Evaluation**: See performance trends over time
+- Scatter plot: Latency vs Recall trade-off
 
-**📋 Comparison Table**
+**Comparison Table**
 - Side-by-side metrics for all evaluations
 - Sortable by any metric
-- Export to CSV for further analysis
 
-**🔗 MLflow Integration**
+**Query Details**
+- **Strategy filter**: View queries for a specific strategy only
+- **Per-query metrics**: Recall, Precision, NDCG, and Latency for each query
+- **Expected vs Retrieved chunks**: Side-by-side with chunk IDs, scores, and text
+- **Match highlighting**: Green border for retrieved chunks that match expected, red for non-matching
+- **Metric breakdown**: Explains how each metric was computed for the query (e.g., "3 of 5 expected found in top 10")
+
+**MLflow Integration**
 - Direct link to MLflow experiment
 - View all runs, parameters, and metrics
 - Full experiment reproducibility
 
 ---
 
-### Step 5: Project Details & History
+### Step 5: Project Details & Management
 
-The **Project Details** page shows comprehensive project history.
+The **Project Details** page shows comprehensive project history and resource management.
 
-**What you'll see:**
-- 📈 **Evaluation History**: All past evaluations with metrics
-- 🔨 **Build History**: All builds with status and configurations
-- 📊 **Metrics Over Time**: Track improvement across iterations
-- 🔗 **MLflow Experiment Link**: Access detailed tracking
+**Build History:**
+- All builds with status (SUCCESS/FAILED/PARTIAL_SUCCESS/RUNNING), configuration summary, and job links
+- Per-source strategy display showing sources, types, and strategies used
+- Delete builds (cascades to evaluations, study associations, and index selections)
+
+**Evaluation History:**
+- Nested under each build, showing all evaluation runs
+- Delete individual evaluations
+
+**Resource Management:**
+- All tracked VS indexes and Delta tables created by builds
+- Mark indexes as "keep" or "discard"
+- **Cleanup**: Preview and permanently delete discarded resources (VS indexes + Delta tables)
+
+**Studies:**
+- Create named studies to group related builds and evaluations
+- Organize experiments within a project
 
 **Actions:**
-- Re-run evaluations on existing builds
-- Compare historical performance
-- Download metrics for reporting
+- Evaluate any successful build directly ("Evaluate This Build" passes the build ID)
+- Refresh build status (polls Databricks for RUNNING/PENDING builds)
+- Delete project (with warning about associated resources)
 
 ---
 
@@ -330,47 +321,36 @@ Precision@10 = (Relevant docs in top 10) / 10
 
 ## Common Workflows
 
-### Workflow 1: Find the Best Chunking Strategy
+### Workflow 1: Multi-Source RAG Comparison (Recommended)
+
+```
+1. Create Project "MedRAG"
+2. Build: Add "clinical_pdfs" (UC Volume, *.pdf) with baseline + structured
+         Add "research_notes" (UC Volume, *.txt) with baseline + semantic
+3. Evaluate with auto-generated queries (50+ queries)
+4. Review → Per-Source Comparison shows:
+   - For clinical_pdfs: structured > baseline (why?)
+   - For research_notes: semantic > baseline (why?)
+5. Keep the 2 winning indexes, discard the rest
+6. Cleanup to delete unwanted VS indexes and Delta tables
+```
+
+### Workflow 2: Single Source Strategy Comparison
 
 ```
 1. Create Project
-2. Build with ALL strategies (baseline, semantic, structured, parent-child)
-3. Evaluate with auto-generated queries (50+ queries)
-4. Review → Check "Best Strategy"
+2. Build: Add source with ALL strategies (baseline, semantic, structured, parent-child)
+3. Evaluate with auto-generated queries
+4. Review → Filter Query Details by strategy to see per-query performance
 5. Use winning strategy for production
 ```
 
-### Workflow 2: Optimize a Single Strategy
-
-```
-1. Create Project
-2. Build with baseline (chunk_size=512, overlap=50)
-3. Evaluate
-4. Build with baseline (chunk_size=1024, overlap=100)
-5. Evaluate
-6. Review → Compare parameter impact
-```
-
-### Workflow 3: Test Different Data Sources
-
-```
-1. Create Project "Customer Docs - Delta"
-2. Build using Delta table
-3. Evaluate
-
-4. Create Project "Customer Docs - PDFs"
-5. Build using uploaded PDFs
-6. Evaluate
-
-7. Compare projects in MLflow
-```
-
-### Workflow 4: Iterate and Improve
+### Workflow 3: Iterate and Improve
 
 ```
 1. Build → Evaluate → Review (Baseline: Recall@10 = 0.65)
-2. Analyze poor queries in MLflow
-3. Adjust data preprocessing
+2. Review Query Details → identify failing queries, check chunk match highlighting
+3. Adjust chunking parameters or data preprocessing
 4. Build → Evaluate → Review (Semantic: Recall@10 = 0.78)
 5. Repeat until satisfied
 ```
@@ -416,10 +396,11 @@ Precision@10 = (Relevant docs in top 10) / 10
 **Cause:** Data source configuration issue
 
 **Fix:**
-- Verify Delta table exists and has data
+- For UC Volumes: verify the volume path exists and contains files matching the pattern
+- For Delta tables: verify the table exists and has data
 - Check column names match configuration
-- Ensure you have permissions to read the table
-- Try with a smaller dataset first (`max_rows=100`)
+- Ensure the service principal has read permissions
+- Check the Databricks job logs for detailed `[DEBUG]` output showing file listing results
 
 ### Evaluation shows 0 metrics
 
@@ -450,15 +431,23 @@ Precision@10 = (Relevant docs in top 10) / 10
 - Or skip the index - queries will work (slightly slower)
 - See DEPLOYMENT_GUIDE.md for details
 
-### Frontend not loading
+### Build shows SUCCESS but actually failed
 
-**Cause:** Backend not serving static files or CORS issue
+**Cause:** The app now inspects the notebook's exit value, but older deployments may not
 
 **Fix:**
-- Ensure `npm run build` was run in frontend/
-- Check backend is running on port 8000
-- Verify `backend/main.py` has `mount_spa()` call
-- Check browser console for errors
+- Redeploy with latest code (build status endpoint inspects notebook output)
+- Check the Databricks job logs for the actual exit message
+- PARTIAL_SUCCESS with all combos failed is mapped to FAILED
+
+### Frontend not loading
+
+**Cause:** Frontend bundle not rebuilt after code changes
+
+**Fix:**
+- Run `cd frontend && npm run build` to create fresh bundle
+- Redeploy to Databricks Apps
+- Hard-refresh browser (Cmd+Shift+R) to clear cached JS
 
 ---
 
@@ -490,10 +479,15 @@ Precision@10 = (Relevant docs in top 10) / 10
 - OCR support (coming soon)
 - Best for: Documents, reports, manuals
 
-### ✅ UC Volume
+### DOCX / Word Documents
+- Upload Word documents
+- Text extraction via python-docx (paragraphs, headings, tables)
+- Best for: Institutional documents, reports, SOPs
+
+### UC Volume
 - Read files from Unity Catalog Volumes
-- Glob pattern support (`*.txt`, `**/*.pdf`)
-- Recursive directory traversal
+- Glob pattern support (`*.txt`, `*.pdf`, `*.docx`)
+- Binary files downloaded via Databricks SDK Files API (serverless-safe)
 - Best for: Large file collections, enterprise data
 
 ---
@@ -510,7 +504,7 @@ Precision@10 = (Relevant docs in top 10) / 10
 ┌───────────────────────────▼─────────────────────────────────────┐
 │                     Backend (FastAPI + Python)                   │
 │                                                                   │
-│  API Routes → Job Submission → Status Polling                    │
+│  API: /projects /builds /evaluations /cleanup /studies /uploads   │
 └─────┬──────────┬──────────┬──────────┬──────────────────────────┘
       │          │          │          │
       ▼          ▼          ▼          ▼
@@ -524,11 +518,12 @@ Precision@10 = (Relevant docs in top 10) / 10
 ```
 
 **Tech Stack:**
-- **Frontend**: React 18, TypeScript, Vite, TailwindCSS
+- **Frontend**: React 18, TypeScript, Vite, TailwindCSS, Plotly.js
 - **Backend**: FastAPI, Pydantic, Databricks SDK
 - **Data**: Lakebase PostgreSQL, Delta Lake, Vector Search
 - **Tracking**: MLflow
 - **Compute**: Databricks Serverless (no cluster management)
+- **File Processing**: PyMuPDF (PDF), python-docx (Word)
 
 ---
 
