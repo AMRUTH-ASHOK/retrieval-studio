@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from typing import List, Dict, Any
 from pydantic import BaseModel
 
-from backend.auth import get_workspace_client, get_sql_connector
+from backend.auth import get_workspace_client, get_sql_connector, get_vector_search_client
 from backend.config import settings
 import sys
 import os
@@ -42,6 +42,80 @@ async def update_indexes_status(project_id: str, body: BulkStatusUpdate, sql_con
         updates = [{"id": u.id, "status": u.status} for u in body.updates]
         count = bulk_update_index_status(project_id, updates)
         return {"updated": count}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/projects/{project_id}/indexes/{selection_id}")
+async def delete_single_index(
+    project_id: str,
+    selection_id: str,
+    w=Depends(get_workspace_client),
+    sql_connector=Depends(get_sql_connector)
+):
+    """Delete a single VS index and all related Delta tables inline"""
+    try:
+        from utils.postgres_state import get_postgres_connector
+
+        # Get the index record
+        connector = get_postgres_connector()
+        record = connector.execute(
+            "SELECT * FROM index_selections WHERE id = %s AND project_id = %s",
+            (selection_id, project_id), fetch="one"
+        )
+        if not record:
+            raise HTTPException(status_code=404, detail="Index selection not found")
+
+        idx_name = record.get("index_name", "")
+        chunks_table = record.get("chunks_table", "")
+        vs_endpoint = record.get("vs_endpoint", "")
+        errors = []
+
+        # 1. Delete VS index
+        if idx_name and vs_endpoint:
+            try:
+                vs_client = get_vector_search_client()
+                vs_client.delete_index(endpoint_name=vs_endpoint, index_name=idx_name)
+            except Exception as e:
+                err = str(e).lower()
+                if "not found" not in err and "does not exist" not in err:
+                    errors.append(f"VS index: {str(e)}")
+
+        # 2. Drop chunks Delta table
+        if chunks_table:
+            try:
+                sql_connector.execute(f"DROP TABLE IF EXISTS {chunks_table}")
+            except Exception as e:
+                errors.append(f"Chunks table: {str(e)}")
+
+        # 3. Drop __indexable table (parent_child)
+        if chunks_table:
+            try:
+                sql_connector.execute(f"DROP TABLE IF EXISTS {chunks_table}__indexable")
+            except Exception:
+                pass
+
+        # 4. Remove from index registry
+        try:
+            from retrieval_core.configs import config as core_config
+            registry = core_config.index_registry_table()
+            safe_idx = str(idx_name).replace("'", "''")
+            sql_connector.execute(f"DELETE FROM {registry} WHERE index_name = '{safe_idx}'")
+        except Exception:
+            pass
+
+        # 5. Delete from Postgres
+        connector.execute(
+            "DELETE FROM index_selections WHERE id = %s",
+            (selection_id,), fetch="none"
+        )
+
+        if errors:
+            return {"success": True, "message": f"Deleted with warnings: {'; '.join(errors)}", "warnings": errors}
+        return {"success": True, "message": f"Successfully deleted index {idx_name} and related tables"}
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

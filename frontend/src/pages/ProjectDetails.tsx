@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Plus, ExternalLink, Play, RefreshCw, CheckCircle, XCircle, Clock, AlertCircle, ChevronDown, ChevronRight, Trash2, Database, Shield } from 'lucide-react'
+import { ArrowLeft, Plus, ExternalLink, Play, RefreshCw, CheckCircle, XCircle, Clock, AlertCircle, ChevronDown, ChevronRight, Trash2, Database } from 'lucide-react'
 import { projectsApi } from '../services/projects'
 import { buildsApi } from '../services/builds'
 import { evaluationsApi } from '../services/evaluations'
@@ -29,10 +29,7 @@ export default function ProjectDetails() {
 
   // Resource management state
   const [indexSelections, setIndexSelections] = useState<any[]>([])
-  const [cleanupPreview, setCleanupPreview] = useState<any>(null)
-  const [isCleaningUp, setIsCleaningUp] = useState(false)
-  const [cleanupResult, setCleanupResult] = useState<any>(null)
-  const [showCleanupModal, setShowCleanupModal] = useState(false)
+  const [deletingIndexId, setDeletingIndexId] = useState<string | null>(null)
 
   // MLflow experiment state
   const [mlflowUrl, setMlflowUrl] = useState<string | null>(null)
@@ -65,52 +62,17 @@ export default function ProjectDetails() {
     }
   }
 
-  const handleToggleIndexStatus = async (selectionId: string, currentStatus: string) => {
-    const newStatus = currentStatus === 'keep' ? 'discard' : currentStatus === 'discard' ? 'keep' : 'keep'
-    try {
-      await api.put(`/cleanup/projects/${projectId}/indexes/status`, { updates: [{ id: selectionId, status: newStatus }] })
-      loadIndexSelections()
-    } catch (e) { console.error('Failed to update:', e) }
-  }
-
-  const handlePreviewCleanup = async () => {
+  const handleDeleteIndex = async (selectionId: string, indexName: string) => {
     if (!projectId) return
+    if (!window.confirm(`Delete VS index "${indexName}" and all related Delta tables? This cannot be undone.`)) return
+    setDeletingIndexId(selectionId)
     try {
-      const response = await api.get(`/cleanup/projects/${projectId}/cleanup/preview`)
-      setCleanupPreview(response.data)
-      if (response.data.count > 0) setShowCleanupModal(true)
-      else setError('No resources marked for cleanup. Mark indexes as "discard" first.')
-    } catch (e) { console.error('Preview failed:', e) }
-  }
-
-  const handleRunCleanup = async () => {
-    if (!projectId) return
-    setIsCleaningUp(true)
-    try {
-      const response = await api.post(`/cleanup/projects/${projectId}/cleanup`)
-      setCleanupResult(response.data)
-      setShowCleanupModal(false)
-
-      if (response.data.job_run_id) {
-        const pollCleanup = setInterval(async () => {
-          try {
-            const statusResp = await api.get(`/cleanup/job/${response.data.job_run_id}/status`)
-            const state = statusResp.data?.state
-            if (state === 'SUCCESS' || state === 'FAILED') {
-              clearInterval(pollCleanup)
-              setIsCleaningUp(false)
-              setCleanupResult((prev: any) => ({ ...prev, state, completed: true }))
-              loadIndexSelections()
-            }
-          } catch { /* keep polling */ }
-        }, 5000)
-      } else {
-        setIsCleaningUp(false)
-        loadIndexSelections()
-      }
-    } catch (e) {
-      console.error('Cleanup failed:', e)
-      setIsCleaningUp(false)
+      await api.delete(`/cleanup/projects/${projectId}/indexes/${selectionId}`)
+      setIndexSelections(prev => prev.filter(idx => idx.id !== selectionId))
+    } catch (e: any) {
+      setError(e?.response?.data?.detail || 'Failed to delete index')
+    } finally {
+      setDeletingIndexId(null)
     }
   }
 
@@ -640,113 +602,61 @@ export default function ProjectDetails() {
       )}
 
       {/* Resource Management Section */}
-      {indexSelections.length > 0 && (
+      {builds.length > 0 && (
         <Card className="mt-6">
           <CardContent className="p-6">
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-2">
-                <Database className="w-5 h-5 text-databricks-blue" />
-                <h2 className="text-lg font-semibold text-databricks-gray-900">Resource Management</h2>
-              </div>
-              <Button variant="outline" size="sm" onClick={handlePreviewCleanup}>
-                <Trash2 className="w-4 h-4 mr-1" /> Cleanup Discarded
-              </Button>
+            <div className="flex items-center gap-2 mb-4">
+              <Database className="w-5 h-5 text-databricks-blue" />
+              <h2 className="text-lg font-semibold text-databricks-gray-900">Resource Management</h2>
+              <span className="text-xs text-databricks-gray-500 ml-2">
+                {indexSelections.length} index{indexSelections.length !== 1 ? 'es' : ''}
+              </span>
             </div>
 
-            {cleanupResult && (
-              <div className={`mb-4 p-3 rounded-md border ${cleanupResult.completed && cleanupResult.state === 'SUCCESS' ? 'bg-green-50 border-green-200' : cleanupResult.completed && cleanupResult.state === 'FAILED' ? 'bg-red-50 border-red-200' : 'bg-blue-50 border-blue-200'}`}>
-                <p className={`text-sm ${cleanupResult.completed && cleanupResult.state === 'SUCCESS' ? 'text-green-800' : cleanupResult.completed && cleanupResult.state === 'FAILED' ? 'text-red-800' : 'text-blue-800'}`}>
-                  {cleanupResult.completed && cleanupResult.state === 'SUCCESS'
-                    ? `Cleanup complete! ${cleanupResult.count} resources deleted.`
-                    : cleanupResult.completed && cleanupResult.state === 'FAILED'
-                    ? 'Cleanup job failed. Check the Databricks job for details.'
-                    : isCleaningUp
-                    ? `Cleanup running... ${cleanupResult.count} resources queued for deletion.`
-                    : `Cleanup job submitted. ${cleanupResult.count} resources queued.`}
-                  {cleanupResult.job_url && (
-                    <a href={cleanupResult.job_url} target="_blank" rel="noopener noreferrer" className="ml-2 underline">View job</a>
-                  )}
-                </p>
+            {indexSelections.length === 0 ? (
+              <p className="text-sm text-databricks-gray-500 text-center py-4">
+                No VS indexes tracked yet. Indexes are registered when a build completes successfully.
+              </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-databricks-gray-200">
+                      <th className="text-left py-2 px-3 text-databricks-gray-700">Source</th>
+                      <th className="text-left py-2 px-3 text-databricks-gray-700">Strategy</th>
+                      <th className="text-left py-2 px-3 text-databricks-gray-700">Index</th>
+                      <th className="text-left py-2 px-3 text-databricks-gray-700">Chunks Table</th>
+                      <th className="text-right py-2 px-3 text-databricks-gray-700"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {indexSelections.filter((idx: any) => idx.status !== 'deleted').map((idx: any) => (
+                      <tr key={idx.id} className="border-b border-databricks-gray-100 hover:bg-gray-50">
+                        <td className="py-2 px-3 font-medium">{idx.source_name || '-'}</td>
+                        <td className="py-2 px-3">{idx.strategy_name || '-'}</td>
+                        <td className="py-2 px-3 font-mono text-xs text-databricks-gray-600 max-w-[180px] truncate" title={idx.index_name}>
+                          {idx.index_name?.split('.').pop() || idx.index_name}
+                        </td>
+                        <td className="py-2 px-3 font-mono text-xs text-databricks-gray-500 max-w-[180px] truncate" title={idx.chunks_table}>
+                          {idx.chunks_table?.split('.').pop() || idx.chunks_table || '-'}
+                        </td>
+                        <td className="py-2 px-3 text-right">
+                          <button
+                            onClick={() => handleDeleteIndex(idx.id, idx.index_name)}
+                            disabled={deletingIndexId === idx.id}
+                            className="px-2.5 py-1 text-xs font-medium rounded text-red-700 bg-red-50 border border-red-200 hover:bg-red-100 disabled:opacity-40 transition-colors"
+                          >
+                            {deletingIndexId === idx.id ? 'Deleting...' : 'Delete'}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
-
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-databricks-gray-200">
-                    <th className="text-left py-2 px-3 text-databricks-gray-700">Source</th>
-                    <th className="text-left py-2 px-3 text-databricks-gray-700">Strategy</th>
-                    <th className="text-left py-2 px-3 text-databricks-gray-700">Index Name</th>
-                    <th className="text-center py-2 px-3 text-databricks-gray-700">Status</th>
-                    <th className="text-center py-2 px-3 text-databricks-gray-700">Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {indexSelections.map((idx: any) => (
-                    <tr key={idx.id} className="border-b border-databricks-gray-100">
-                      <td className="py-2 px-3 font-medium">{idx.source_name || '-'}</td>
-                      <td className="py-2 px-3">{idx.strategy_name || '-'}</td>
-                      <td className="py-2 px-3 font-mono text-xs text-databricks-gray-600 max-w-[200px] truncate">{idx.index_name}</td>
-                      <td className="py-2 px-3 text-center">
-                        <Badge variant={idx.status === 'keep' ? 'success' : idx.status === 'discard' ? 'error' : idx.status === 'deleted' ? 'warning' : 'secondary'}>
-                          {idx.status}
-                        </Badge>
-                      </td>
-                      <td className="py-2 px-3 text-center">
-                        {idx.status !== 'deleted' && (
-                          <button onClick={() => handleToggleIndexStatus(idx.id, idx.status)}
-                            className={`px-2 py-1 text-xs font-medium rounded ${idx.status === 'keep' ? 'bg-red-100 text-red-700 hover:bg-red-200' : 'bg-green-100 text-green-700 hover:bg-green-200'}`}>
-                            {idx.status === 'keep' ? 'Mark Discard' : 'Mark Keep'}
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
           </CardContent>
         </Card>
-      )}
-
-      {/* Cleanup Confirmation Modal */}
-      {showCleanupModal && cleanupPreview && (
-        <Modal
-          isOpen={showCleanupModal}
-          onClose={() => setShowCleanupModal(false)}
-          title="Confirm Resource Cleanup"
-          footer={
-            <>
-              <Button variant="outline" onClick={() => setShowCleanupModal(false)} disabled={isCleaningUp}>
-                Cancel
-              </Button>
-              <Button
-                variant="primary"
-                onClick={handleRunCleanup}
-                isLoading={isCleaningUp}
-                disabled={isCleaningUp}
-                className="bg-red-600 hover:bg-red-700 text-white"
-              >
-                {isCleaningUp ? 'Cleaning up...' : `Delete ${cleanupPreview.count} resources`}
-              </Button>
-            </>
-          }
-        >
-          <div className="space-y-4">
-            <div className="p-4 bg-red-50 border border-red-200 rounded-md">
-              <p className="text-sm text-red-900 font-medium">This action cannot be undone!</p>
-              <p className="text-xs text-red-800 mt-1">The following Vector Search indexes and Delta tables will be permanently deleted:</p>
-            </div>
-            <div className="max-h-48 overflow-y-auto space-y-2">
-              {cleanupPreview.indexes_to_delete?.map((idx: any, i: number) => (
-                <div key={i} className="p-2 bg-databricks-gray-50 rounded text-xs">
-                  <p className="font-medium">{idx.source_name} / {idx.strategy_name}</p>
-                  <p className="text-databricks-gray-500 font-mono truncate">{idx.index_name}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-        </Modal>
       )}
 
       {/* Delete Confirmation Modal */}
