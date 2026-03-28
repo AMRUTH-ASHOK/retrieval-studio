@@ -1,129 +1,100 @@
 # Retrieval Studio
 
-A Databricks-native tool for systematically building, evaluating, and optimizing RAG (Retrieval-Augmented Generation) pipelines — without the guesswork.
+> Stop guessing why your RAG app gives bad answers. Start measuring.
 
 ---
 
-## The Problem
+## Sound familiar?
 
-Building a RAG pipeline is easy. Building a *good* one is hard.
+You've built a RAG pipeline. It mostly works. But sometimes it returns completely wrong chunks, misses obvious answers, or hallucinates — and you have no idea why.
 
-Most teams pick a chunking strategy, run a quick vibe-check, and ship — only to find their LLM is hallucinating because the retrieval layer is returning the wrong chunks. Tuning RAG means juggling data sources, chunking strategies, embedding models, and vector indexes with no clear way to measure what's actually working.
+So you tweak the chunk size. Maybe try a different splitter. Re-index. Test again with a few queries. It feels a little better? Hard to tell.
 
-**Retrieval Studio** gives you a structured lab to experiment with and measure retrieval quality — so you can make decisions based on data, not intuition.
-
----
-
-## What It Does
-
-Retrieval Studio helps you:
-
-- **Build** chunk indexes from your data using different chunking strategies
-- **Evaluate** retrieval quality with standard metrics (Recall@K, NDCG@K, Precision@K)
-- **Compare** strategies side-by-side to find what works best for your data
-- **Manage** your Vector Search indexes and Delta tables as experiments evolve
-
-Everything runs natively on Databricks — your data never leaves your lakehouse.
+This is the loop most teams are stuck in. **Retrieval Studio breaks it.**
 
 ---
 
-## Key Features
+## What is Retrieval Studio?
 
-### Projects
-Organize your work into projects. Each project ties to a Unity Catalog schema, a Vector Search endpoint, and an embedding model endpoint.
+Retrieval Studio is a lab for your RAG retrieval layer. It lives in your Databricks workspace and lets you **systematically experiment** with how your data gets chunked and indexed — then **measure** which approach actually performs best.
 
-### Build
-Configure data sources and chunking strategies, then submit a Databricks job to build your indexes.
-
-- Supports multiple data sources per build (UC Volumes, Delta tables, file uploads)
-- Choose from multiple chunking strategies per source: **baseline**, **semantic**, **structured**, **parent-child**, **sentence**, and **paragraph**
-- Each source × strategy combination generates its own Delta chunk table and Vector Search index
-- All runs are tracked in MLflow
-
-### Evaluate
-Measure how well your indexes retrieve the right content.
-
-- **Auto-generate** synthetic queries from your chunk tables
-- **Bring your own** golden dataset (a Delta table with `query_text` and `expected_chunks`)
-- Compare ANN, HYBRID, and FULL_TEXT search modes
-- Configure top-K, judge model, and query style
-- Results are written to Delta and tracked in MLflow
-
-### Review
-Analyze results and find your best-performing strategy.
-
-- See aggregated metrics across all strategies
-- Compare strategies per data source with LLM-generated explanations
-- Drill into individual queries to see expected vs. retrieved chunks
-- Visual charts and comparison tables
-
-### Resource Management
-Keep your workspace clean as you iterate.
-
-- Mark indexes as **keep** or **discard** after reviewing results
-- Run cleanup jobs to delete discarded indexes and tables
-- Group related builds and evaluations into **studies**
+Instead of guessing, you get numbers: Recall@K, NDCG@K, Precision@K — across every chunking strategy, every data source, every search mode.
 
 ---
 
-## How to Use It
+## Meet Priya
 
-### 1. Create a Project
-Go to **Projects** and create a new project. You'll need:
-- A Unity Catalog catalog and schema
-- A Vector Search endpoint
-- An embedding model endpoint
+*Priya is an ML engineer at a healthcare company. Her team built a RAG chatbot over clinical guidelines — but doctors keep complaining the answers are vague or miss key details. She suspects the chunking is bad but doesn't know where to start.*
 
-### 2. Build an Index
-Go to **Build** and follow the wizard:
-1. Add your data sources (UC Volume path, Delta table, or file upload)
-2. Assign one or more chunking strategies to each source
-3. Configure your embedding endpoint
-4. Review the build matrix and submit
-
-Databricks runs the job in the background. You can track progress from the project detail page.
-
-### 3. Run an Evaluation
-Once a build completes, go to **Evaluate**:
-1. Select the build to evaluate
-2. Choose auto-generated queries or upload a golden set
-3. Set your top-K, judge model, and search mode
-4. Submit and wait for results
-
-### 4. Review Results
-Go to **Review** to compare builds and evaluations:
-- See which strategy performed best overall
-- Compare strategies for each data source
-- Inspect individual query results to understand failures
-
-### 5. Iterate
-Based on what you find, go back to **Build** with a refined strategy — this time with data to back your decisions.
+Here's how Priya uses Retrieval Studio:
 
 ---
 
-## Requirements
+### Step 1 — She opens the app and creates a Project
 
-- A Databricks workspace with Unity Catalog enabled
-- A Vector Search endpoint
-- An embedding model endpoint (e.g., a model served via Databricks Model Serving)
-- Lakebase PostgreSQL for app state (configured via environment variables)
+Priya clicks **New Project**, gives it a name ("Clinical Guidelines v2"), and points it at her Unity Catalog schema and Vector Search endpoint. That's it — the project is her workspace for this experiment.
 
 ---
 
-## Deployment
+### Step 2 — She sets up a Build
 
-Retrieval Studio is deployed as a **Databricks App** using `app.yaml`. The backend is a FastAPI service; the frontend is a React app built with Vite.
+Priya goes to **Build** and adds her data sources: a UC Volume with PDFs of clinical guidelines, and a Delta table with structured drug interaction data.
 
-```bash
-# Install dependencies
-npm install        # installs frontend deps
-pip install -r backend/requirements.txt
+Then — and this is the key part — she assigns multiple **chunking strategies** to each source. For the PDFs she tries *semantic* and *paragraph*. For the structured table she tries *baseline* and *structured*.
 
-# Build frontend
-npm run build
+She hits **Submit**. Databricks runs the job. Each source × strategy combination gets its own vector index. She goes to lunch.
 
-# Run locally (set required env vars first)
-uvicorn backend.main:app --port 8000
-```
+---
 
-Required environment variables are documented in `app.yaml`.
+### Step 3 — She evaluates
+
+Build's done. Priya goes to **Evaluate**, selects her build, and lets the app auto-generate synthetic queries from her chunks. She could also upload a golden set of real queries from her doctors — but the auto-generated ones are good enough to start.
+
+She picks a judge model, sets top-5, and submits. Another job runs. This time she gets coffee.
+
+---
+
+### Step 4 — She sees what's actually happening
+
+Priya opens **Review**. Here's what she finds:
+
+- For the PDF guidelines: *semantic* chunking beats *paragraph* by 18 points on Recall@5
+- For the drug interaction table: *structured* chunking wins easily — baseline was splitting rows mid-sentence
+- The app even gives her an LLM-generated explanation of *why* semantic chunking works better for her docs
+
+She clicks into a few individual query results to see exactly which chunks were returned vs. what was expected. The misses are obvious now.
+
+---
+
+### Step 5 — She ships with confidence
+
+Priya marks the winning indexes as **Keep**, discards the losers, and runs a cleanup job to remove the unused indexes from her workspace. She goes back to **Build** with one tweak — trying *parent-child* chunking for the PDFs — and runs another round.
+
+Two iterations later, Recall@5 is up 31% from where she started. She has the MLflow runs to prove it.
+
+---
+
+## What you get
+
+| | |
+|---|---|
+| **Multiple chunking strategies** | Baseline, semantic, structured, parent-child, sentence, paragraph — tested in parallel |
+| **Multi-source builds** | Different strategies for different data sources in one build |
+| **Auto-generated eval queries** | No golden dataset? The app generates synthetic queries from your chunks |
+| **Real metrics** | Recall@K, NDCG@K, Precision@K — not vibes |
+| **Side-by-side comparison** | Charts, tables, and LLM explanations of what's working and why |
+| **Query-level inspection** | See exactly which chunks were returned vs. expected |
+| **MLflow tracking** | Every build and eval run is logged automatically |
+| **Clean workspace** | Keep winning indexes, discard the rest, run cleanup |
+
+---
+
+## Getting started
+
+The app is already running in your Databricks workspace. Just open it and:
+
+1. **Create a project** — name it, point it at your catalog and Vector Search endpoint
+2. **Build** — add your data sources, pick your chunking strategies, submit
+3. **Evaluate** — run metrics against your build
+4. **Review** — find your winner
+5. **Iterate** — go again with what you learned
